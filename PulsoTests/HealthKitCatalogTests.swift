@@ -97,17 +97,62 @@ final class HealthKitCatalogTests: XCTestCase {
         XCTAssertEqual(dto.details?["answers"], .array(Array(repeating: "severalDays", count: 7)))
     }
 
+    private func medication(_ key: String, _ name: String, stamp: String = "2026-01-01T00:00:00Z") -> SampleDTO {
+        var dto = SampleDTO(uuid: key, type: "medication", start: stamp, end: stamp, source: "Apple Health")
+        dto.details = ["displayText": .string(name)]
+        return dto
+    }
+
     /// Snapshot records are stamped at read time; only content may decide
     /// whether a record is re-sent.
     func testSnapshotFingerprintIgnoresTimestamps() {
-        var a = SampleDTO(uuid: "characteristics", type: "characteristics", start: "2026-01-01T00:00:00Z",
-                          end: "2026-01-01T00:00:00Z", source: "Apple Health")
-        a.details = ["bloodType": "oPositive"]
-        var b = a
-        b.start = "2026-02-02T00:00:00Z"
-        b.end = b.start
-        XCTAssertEqual(SyncEngine.fingerprint(a), SyncEngine.fingerprint(b))
-        b.details = ["bloodType": "aNegative"]
-        XCTAssertNotEqual(SyncEngine.fingerprint(a), SyncEngine.fingerprint(b))
+        let a = medication("m", "Ibuprofen")
+        var b = medication("m", "Ibuprofen", stamp: "2026-02-02T00:00:00Z")
+        XCTAssertEqual(SnapshotState.fingerprint(a), SnapshotState.fingerprint(b))
+        b.details = ["displayText": "Aspirin"]
+        XCTAssertNotEqual(SnapshotState.fingerprint(a), SnapshotState.fingerprint(b))
+    }
+
+    /// A -> B -> A must produce three distinct uuids, each superseding the
+    /// one before: a receiver that tombstoned A's uuid would otherwise
+    /// drop the change back.
+    func testSnapshotVersionsNeverReuseAUUID() {
+        var state = SnapshotState(epoch: "e")
+        var result = state.apply([medication("m", "A")], complete: true)
+        XCTAssertEqual(result.send.map(\.uuid), ["m-e-v1"])
+        XCTAssertEqual(result.send.first?.details?["recordKey"], "m")
+        XCTAssertEqual(result.superseded, [])
+
+        XCTAssertTrue(state.apply([medication("m", "A")], complete: true).send.isEmpty, "unchanged is not resent")
+
+        result = state.apply([medication("m", "B")], complete: true)
+        XCTAssertEqual(result.send.map(\.uuid), ["m-e-v2"])
+        XCTAssertEqual(result.superseded, ["m-e-v1"])
+
+        result = state.apply([medication("m", "A")], complete: true)
+        XCTAssertEqual(result.send.map(\.uuid), ["m-e-v3"])
+        XCTAssertEqual(result.superseded, ["m-e-v2"])
+    }
+
+    func testCompleteSnapshotsTombstoneMissingRecordsButNotOnAnEmptyRead() {
+        var state = SnapshotState(epoch: "e")
+        _ = state.apply([medication("m1", "A"), medication("m2", "B")], complete: true)
+
+        // An empty read (no access) deletes nothing.
+        XCTAssertEqual(state.apply([], complete: true).superseded, [])
+
+        var result = state.apply([medication("m1", "A")], complete: true)
+        XCTAssertEqual(result.superseded, ["m2-e-v1"])
+        XCTAssertEqual(state.fingerprints.keys.sorted(), ["m1"])
+
+        // Back again: a new version, nothing left to supersede.
+        result = state.apply([medication("m1", "A"), medication("m2", "B")], complete: true)
+        XCTAssertEqual(result.send.map(\.uuid), ["m2-e-v2"])
+        XCTAssertEqual(result.superseded, [])
+
+        // Windowed sources never infer deletions.
+        var window = SnapshotState(epoch: "w")
+        _ = window.apply([medication("d1", "x"), medication("d2", "y")], complete: false)
+        XCTAssertEqual(window.apply([medication("d2", "y")], complete: false).superseded, [])
     }
 }
