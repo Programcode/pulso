@@ -62,6 +62,8 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p sdk-headers
           cp -R "$SDK/System/Library/Frameworks/HealthKit.framework/Headers" sdk-headers/HealthKit
+          find "$SDK/System/Library/Frameworks/HealthKit.framework/Modules" -name 'arm64-apple-ios.swiftinterface' \
+            -exec cp {} sdk-headers/HealthKit.swiftinterface \; || true
           xcrun --sdk iphoneos --show-sdk-version > sdk-headers/SDK_VERSION
           xcodebuild -version > sdk-headers/XCODE_VERSION
           python3 scripts/gen_healthkit_catalog.py sdk-headers/HealthKit Pulso/Health/HealthKitCatalog.generated.swift

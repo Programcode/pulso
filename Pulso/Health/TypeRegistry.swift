@@ -245,9 +245,7 @@ enum TypeRegistry {
                 sampleType: HKObjectType.stateOfMindType(), frequency: .immediate, serialize: Serializers.stateOfMind
             ))
             for entry in HealthKitCatalog.otherIdentifiers where entry.kind == "HKScoredAssessmentTypeIdentifier" {
-                guard isAvailable(entry.minimumOS),
-                      let type = HKObjectType.scoredAssessmentType(
-                          forIdentifier: HKScoredAssessmentTypeIdentifier(rawValue: entry.identifier)) else { continue }
+                guard isAvailable(entry.minimumOS), let type = scoredAssessmentType(entry.identifier) else { continue }
                 let stem = String(entry.identifier.dropFirst("HKScoredAssessmentTypeIdentifier".count))
                 types.append(SyncedType(
                     key: entry.key, displayName: "\(entry.name) Assessment", group: Group.mental,
@@ -275,6 +273,15 @@ enum TypeRegistry {
         }
         return types
     }()
+
+    /// +[HKObjectType scoredAssessmentTypeForIdentifier:] isn't exposed to
+    /// Swift under a stable name, so it is called through the runtime.
+    private static func scoredAssessmentType(_ identifier: String) -> HKSampleType? {
+        let selector = NSSelectorFromString("scoredAssessmentTypeForIdentifier:")
+        let factory: AnyObject = HKObjectType.self
+        guard factory.responds(to: selector) else { return nil }
+        return factory.perform(selector, with: identifier)?.takeUnretainedValue() as? HKSampleType
+    }
 
     // MARK: - Public surface
 
