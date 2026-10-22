@@ -21,6 +21,12 @@ struct AnchorStore: Sendable {
         return try? NSKeyedUnarchiver.unarchivedObject(ofClass: HKQueryAnchor.self, from: data)
     }
 
+    /// The stored bytes as-is: snapshot sources keep their delivered-state
+    /// fingerprints here instead of an HKQueryAnchor.
+    func loadRaw(_ key: String) -> Data? {
+        try? Data(contentsOf: url(for: key))
+    }
+
     func archive(_ anchor: HKQueryAnchor) -> Data? {
         try? NSKeyedArchiver.archivedData(withRootObject: anchor, requiringSecureCoding: true)
     }
@@ -32,6 +38,11 @@ struct AnchorStore: Sendable {
 
     func saveRaw(_ data: Data, for key: String) {
         try? data.write(to: url(for: key), options: .atomic)
+    }
+
+    /// Like saveRaw, but a failed write is the caller's to handle.
+    func writeRaw(_ data: Data, for key: String) throws {
+        try data.write(to: url(for: key), options: .atomic)
     }
 
     func hasAnchor(_ key: String) -> Bool {

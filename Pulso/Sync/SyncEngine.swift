@@ -53,6 +53,7 @@ actor SyncEngine {
     static let queryLimit = 5000
 
     private let healthStore: HKHealthStore
+    private let queries: HealthQueries
     private let anchors: AnchorStore
     private let outbox: Outbox
     private let log: LogStore
@@ -60,6 +61,8 @@ actor SyncEngine {
     /// GET /latest from the configured server; nil when unavailable.
     private let latestHints: @Sendable () async -> [String: String]?
     private var anchorCache: [String: HKQueryAnchor] = [:]
+    /// Snapshot state as last queued; survives in memory between passes.
+    private var snapshotCache: [String: SnapshotState] = [:]
     private var chain: Task<Void, Never>?
     /// Types whose query threw last time (typically authorization not yet
     /// granted for a newly added type). They must not hold the catch-up
@@ -77,6 +80,7 @@ actor SyncEngine {
         latestHints: @escaping @Sendable () async -> [String: String]? = { nil }
     ) {
         self.healthStore = healthStore
+        queries = HealthQueries(store: healthStore)
         self.anchors = anchors
         self.outbox = outbox
         self.log = log
@@ -86,23 +90,29 @@ actor SyncEngine {
 
     /// Every trigger funnels here. Passes are serialized; each caller returns
     /// after its own pass (and the outbox drain it triggers) completes.
-    func requestSync(_ reason: SyncReason) async {
+    /// `only` limits a pass to those type keys (observer wakes name the
+    /// types that changed); nil means every enabled type and snapshot.
+    func requestSync(_ reason: SyncReason, only keys: Set<String>? = nil) async {
         let previous = chain
         let task = Task {
             await previous?.value
-            await self.performSync(reason)
+            await self.performSync(reason, only: keys)
         }
         chain = task
         await task.value
     }
 
-    private func performSync(_ reason: SyncReason) async {
+    private func performSync(_ reason: SyncReason, only keys: Set<String>?) async {
         guard AppSettings.currentTarget() != nil else {
             await log.info("sync skipped (\(reason)): no server configured")
             return
         }
         await status.setSyncing(true)
-        let enabled = AppSettings.currentEnabledTypes()
+        // Types this OS refused at authorization would only fail their query.
+        let refused = HealthAuthorization.lastRejected()
+        let enabled = AppSettings.currentEnabledTypes().filter {
+            !refused.contains($0.sampleType.identifier) && (keys?.contains($0.key) ?? true)
+        }
 
         // A user-visible pass may follow a permission grant — retry types
         // that were failing. Background wakes keep them excluded.
@@ -157,7 +167,19 @@ actor SyncEngine {
                 await log.error("\(type.key): \(error.localizedDescription)")
             }
         }
-        if reimporting && !anyFailed {
+        // Snapshots have no observer of their own; they ride along on every
+        // full pass.
+        if keys == nil {
+            for source in AppSettings.currentEnabledSnapshots() {
+                do {
+                    queued += try await syncSnapshot(source)
+                } catch {
+                    anyFailed = true
+                    await log.error("\(source.key): \(error.localizedDescription)")
+                }
+            }
+        }
+        if reimporting && !anyFailed && keys == nil {
             UserDefaults.standard.set(false, forKey: SettingsKeys.reimportPending)
             await log.info("full re-import pass completed for all enabled types")
         }
@@ -197,7 +219,7 @@ actor SyncEngine {
             let descriptor = HKAnchoredObjectQueryDescriptor(
                 predicates: [.sample(type: type.sampleType, predicate: datePredicate)],
                 anchor: anchor,
-                limit: Self.queryLimit
+                limit: type.queryLimit
             )
             let result = try await descriptor.result(for: healthStore)
             let added = result.addedSamples
@@ -215,7 +237,14 @@ actor SyncEngine {
                 return queued
             }
 
-            let dtos = added.compactMap { type.serialize($0, .live) }
+            var dtos: [SampleDTO] = []
+            dtos.reserveCapacity(added.count)
+            for sample in added {
+                guard let dto = type.serialize(sample, .live) else { continue }
+                // A failed enrich query throws out of the pass: the anchor
+                // stays put and these samples are read again next time.
+                dtos.append(try await type.enrich?(queries, dto, sample) ?? dto)
+            }
             if dtos.count < added.count {
                 await log.warn("\(type.key): \(added.count - dtos.count) sample(s) not serializable — skipped")
             }
@@ -236,10 +265,69 @@ actor SyncEngine {
             } else {
                 await log.info("\(type.key): queued \(dtos.count) sample(s)")
             }
-            if added.count < Self.queryLimit && deleted.count < Self.queryLimit {
+            if added.count < type.queryLimit && deleted.count < type.queryLimit {
                 return queued
             }
         }
+    }
+
+    /// A snapshot batch and the state it leads to, written as one file
+    /// before anything is queued.
+    private struct SnapshotJournal: Codable {
+        let state: SnapshotState
+        let elements: [BatchElement]
+    }
+
+    private func journalURL(_ key: String) -> URL {
+        anchors.directory.appendingPathComponent("\(key).journal")
+    }
+
+    /// Reads a snapshot source and queues new versions of the records whose
+    /// content changed (see SnapshotState). Queueing the batch and saving
+    /// the state are separate writes, so both go through a journal: if
+    /// either fails, or the app dies between them, the next pass replays
+    /// the same batch (same uuids, harmless to receivers) and then saves
+    /// the state, before reading anything new.
+    private func syncSnapshot(_ source: SnapshotSource) async throws -> Int {
+        try await replaySnapshotJournal(source.key)
+        let known = snapshotCache[source.key]
+            ?? anchors.loadRaw(source.key).flatMap { try? JSONDecoder().decode(SnapshotState.self, from: $0) }
+        let records = try await source.read(queries, .live, known?.fingerprints)
+        var state = known ?? .fresh()
+        let (send, superseded) = state.apply(records, complete: source.complete)
+        await status.recordChecked(source.key)
+        guard !send.isEmpty || !superseded.isEmpty else {
+            if known == nil {
+                try anchors.writeRaw(JSONEncoder().encode(state), for: source.key)
+            }
+            return 0
+        }
+        var elements = send.map(BatchElement.sample)
+        if !superseded.isEmpty {
+            elements.append(.tombstone(superseded))
+        }
+        let journal = SnapshotJournal(state: state, elements: elements)
+        try Wire.fileEncoder().encode(journal).write(to: journalURL(source.key), options: .atomic)
+        try await replaySnapshotJournal(source.key)
+        await log.info("\(source.key): queued \(send.count) new version(s), \(superseded.count) superseded")
+        return send.count
+    }
+
+    private func replaySnapshotJournal(_ key: String) async throws {
+        let url = journalURL(key)
+        guard let data = try? Data(contentsOf: url) else { return }
+        let journal: SnapshotJournal
+        do {
+            journal = try Wire.fileDecoder().decode(SnapshotJournal.self, from: data)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            await log.error("\(key): unreadable snapshot journal discarded")
+            return
+        }
+        try await outbox.enqueue(typeKey: key, elements: journal.elements, anchor: nil)
+        try anchors.writeRaw(JSONEncoder().encode(journal.state), for: key)
+        try FileManager.default.removeItem(at: url)
+        snapshotCache[key] = journal.state
     }
 
     /// The SDK has flip-flopped on the optionality of `newAnchor`; funneling
@@ -250,6 +338,7 @@ actor SyncEngine {
 
     func resetAllAnchors() {
         anchorCache = [:]
+        snapshotCache = [:]
         authBlocked = []
         latestFetch = nil
     }

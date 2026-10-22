@@ -251,51 +251,38 @@ final class SerializerTests: XCTestCase {
         XCTAssertNil(dto.metadata, "no metadata key means absent, not false")
     }
 
-    /// The wire type keys are protocol surface — pin the full v1.1 set.
-    func testRegistryCoversTheV11TypeSet() {
-        var expected = [
-            // Sleep & Circadian
-            "sleepAnalysis", "timeInDaylight", "appleSleepingWristTemperature",
+    /// The v1.1 wire type keys are protocol surface: the full-coverage
+    /// registry must still carry every one, with the v1.1 unit label.
+    func testRegistryKeepsTheV11TypeSetAndUnits() {
+        var expected: [String: String?] = [
+            "sleepAnalysis": nil, "appleStandHour": nil, "mindfulSession": nil, "workout": nil, "sexualActivity": nil,
         ]
-        if #available(iOS 18.0, *) {
-            expected.append("appleSleepingBreathingDisturbances")
+        for (key, legacy) in TypeRegistry.legacyUnits {
+            expected[key] = legacy.label
         }
-        expected += [
-            "appleStandHour", "mindfulSession",
-            // Workouts
-            "workout",
-            // Energy & Activity
-            "stepCount", "activeEnergyBurned", "basalEnergyBurned", "physicalEffort",
-            "appleExerciseTime", "appleStandTime", "flightsClimbed",
-            "distanceWalkingRunning", "distanceCycling", "distanceSwimming", "swimmingStrokeCount",
-            // Cardio & Recovery
-            "heartRate", "restingHeartRate", "heartRateVariabilitySDNN", "vo2Max",
-            "heartRateRecoveryOneMinute", "walkingHeartRateAverage", "oxygenSaturation", "respiratoryRate",
-            // Body
-            "bodyMass", "bodyFatPercentage", "leanBodyMass", "bodyMassIndex",
-            "waistCircumference", "height",
-            // Running & Gait
-            "runningPower", "runningSpeed", "runningStrideLength", "runningVerticalOscillation",
-            "runningGroundContactTime", "walkingSpeed", "walkingStepLength",
-            "walkingAsymmetryPercentage", "walkingDoubleSupportPercentage", "appleWalkingSteadiness",
-            "sixMinuteWalkTestDistance", "stairAscentSpeed", "stairDescentSpeed",
-            // Audio Exposure
-            "environmentalAudioExposure", "headphoneAudioExposure",
-            // Nutrition
-            "dietaryEnergyConsumed", "dietaryProtein", "dietaryCarbohydrates", "dietaryFatTotal",
-            "dietaryFiber", "dietarySugar", "dietarySodium", "dietaryWater", "dietaryCaffeine",
-            "numberOfAlcoholicBeverages",
-            // Lifestyle
-            "sexualActivity",
-        ]
-        XCTAssertEqual(TypeRegistry.all.map(\.key), expected)
-        XCTAssertEqual(Set(TypeRegistry.all.map(\.key)).count, TypeRegistry.all.count, "keys must be unique")
-        XCTAssertEqual(TypeRegistry.readTypes.count, TypeRegistry.all.count)
-        XCTAssertEqual(TypeRegistry.groups.count, 9)
-        // Only the app's raison-d'être types warrant .immediate wakes.
-        XCTAssertEqual(
-            TypeRegistry.all.filter { $0.frequency == .immediate }.map(\.key),
-            ["sleepAnalysis", "workout"]
-        )
+        if #unavailable(iOS 18.0) {
+            expected["appleSleepingBreathingDisturbances"] = nil
+        }
+        XCTAssertEqual(expected.count, 58 - (ProcessInfo.processInfo.isOperatingSystemAtLeast(
+            OperatingSystemVersion(majorVersion: 18, minorVersion: 0, patchVersion: 0)) ? 0 : 1))
+        let start = Date()
+        for (key, label) in expected {
+            guard let type = TypeRegistry.type(for: key) else {
+                XCTFail("v1.1 type \(key) missing")
+                continue
+            }
+            guard let label, let quantityType = type.sampleType as? HKQuantityType,
+                  let presentation = TypeRegistry.presentation(for: quantityType) else { continue }
+            XCTAssertEqual(presentation.label, label, key)
+            // Some types (audio exposure) require a non-zero duration.
+            let sample = HKQuantitySample(
+                type: quantityType, quantity: HKQuantity(unit: presentation.unit, doubleValue: 1),
+                start: start, end: start.addingTimeInterval(60))
+            XCTAssertEqual(type.serialize(sample, context)?.unit, label, key)
+        }
+        let keys = TypeRegistry.all.map(\.key) + TypeRegistry.snapshots.map(\.key)
+        XCTAssertEqual(Set(keys).count, keys.count, "keys must be unique")
+        XCTAssertEqual(TypeRegistry.type(for: "sleepAnalysis")?.frequency, .immediate)
+        XCTAssertEqual(TypeRegistry.type(for: "workout")?.frequency, .immediate)
     }
 }

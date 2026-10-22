@@ -54,6 +54,25 @@ jobs:
           echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
           echo "Version $MARKETING ($GITHUB_RUN_NUMBER), bundle id $BUNDLE_ID"
 
+      # The catalog of HealthKit types is generated from the SDK headers, so
+      # the IPA covers whatever this SDK declares. A stale committed copy
+      # only produces a warning: regenerate it with the same script.
+      - name: Generate the HealthKit type catalog from this SDK
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p sdk-headers
+          cp -R "$SDK/System/Library/Frameworks/HealthKit.framework/Headers" sdk-headers/HealthKit
+          find "$SDK/System/Library/Frameworks/HealthKit.framework/Modules" -name 'arm64-apple-ios.swiftinterface' \
+            -exec cp {} sdk-headers/HealthKit.swiftinterface \; || true
+          xcrun --sdk iphoneos --show-sdk-version > sdk-headers/SDK_VERSION
+          xcodebuild -version > sdk-headers/XCODE_VERSION
+          python3 scripts/gen_healthkit_catalog.py sdk-headers/HealthKit Pulso/Health/HealthKitCatalog.generated.swift
+          if ! git diff --quiet -- Pulso/Health/HealthKitCatalog.generated.swift; then
+            echo "::warning::HealthKitCatalog.generated.swift is stale for iOS SDK $(cat sdk-headers/SDK_VERSION); this build uses the regenerated copy (uploaded as an artifact)."
+            git diff --stat -- Pulso/Health/HealthKitCatalog.generated.swift
+          fi
+          cp Pulso/Health/HealthKitCatalog.generated.swift sdk-headers/
+
       - name: Build for device without signing
         run: |
           if ! xcodebuild build \
@@ -99,14 +118,6 @@ jobs:
           cp Pulso/Pulso.entitlements dist/Pulso.entitlements
           unzip -l "dist/$NAME" | tail -3
           echo "IPA_NAME=$NAME" >> "$GITHUB_ENV"
-
-      - name: Dump the SDK's HealthKit headers
-        run: |
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          mkdir -p sdk-headers
-          cp -R "$SDK/System/Library/Frameworks/HealthKit.framework/Headers" sdk-headers/HealthKit
-          xcrun --sdk iphoneos --show-sdk-version > sdk-headers/SDK_VERSION
-          xcodebuild -version > sdk-headers/XCODE_VERSION
 
       - uses: actions/upload-artifact@v4
         with:

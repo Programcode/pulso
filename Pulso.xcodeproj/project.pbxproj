@@ -36,6 +36,13 @@
 		B1000000000000000000001F /* AnchorStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001F /* AnchorStoreTests.swift */; };
 		B10000000000000000000020 /* WireFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000020 /* WireFormatTests.swift */; };
 		B10000000000000000000021 /* TestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000021 /* TestSupport.swift */; };
+		B20000000000000000000001 /* HealthKitCatalog.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* HealthKitCatalog.generated.swift */; };
+		B20000000000000000000002 /* HealthQueries.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000002 /* HealthQueries.swift */; };
+		B20000000000000000000003 /* Snapshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000003 /* Snapshots.swift */; };
+		B20000000000000000000004 /* HealthAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000004 /* HealthAuthorization.swift */; };
+		B20000000000000000000005 /* ObjC.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000005 /* ObjC.swift */; };
+		B20000000000000000000006 /* ObjCExceptions.m in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000006 /* ObjCExceptions.m */; };
+		B20000000000000000000007 /* HealthKitCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000009 /* HealthKitCatalogTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -82,6 +89,15 @@
 		F1000000000000000000001F /* AnchorStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnchorStoreTests.swift; sourceTree = "<group>"; };
 		F10000000000000000000020 /* WireFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireFormatTests.swift; sourceTree = "<group>"; };
 		F10000000000000000000021 /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
+		F20000000000000000000001 /* HealthKitCatalog.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitCatalog.generated.swift; sourceTree = "<group>"; };
+		F20000000000000000000002 /* HealthQueries.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthQueries.swift; sourceTree = "<group>"; };
+		F20000000000000000000003 /* Snapshots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Snapshots.swift; sourceTree = "<group>"; };
+		F20000000000000000000004 /* HealthAuthorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthAuthorization.swift; sourceTree = "<group>"; };
+		F20000000000000000000005 /* ObjC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjC.swift; sourceTree = "<group>"; };
+		F20000000000000000000006 /* ObjCExceptions.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ObjCExceptions.m; sourceTree = "<group>"; };
+		F20000000000000000000007 /* ObjCExceptions.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ObjCExceptions.h; sourceTree = "<group>"; };
+		F20000000000000000000008 /* Pulso-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Pulso-Bridging-Header.h; sourceTree = "<group>"; };
+		F20000000000000000000009 /* HealthKitCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitCatalogTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -114,6 +130,7 @@
 		A10000000000000000000002 /* Pulso */ = {
 			isa = PBXGroup;
 			children = (
+				F20000000000000000000008 /* Pulso-Bridging-Header.h */,
 				A10000000000000000000003 /* App */,
 				A10000000000000000000004 /* Model */,
 				A10000000000000000000005 /* Health */,
@@ -150,6 +167,10 @@
 		A10000000000000000000005 /* Health */ = {
 			isa = PBXGroup;
 			children = (
+				F20000000000000000000004 /* HealthAuthorization.swift */,
+				F20000000000000000000003 /* Snapshots.swift */,
+				F20000000000000000000002 /* HealthQueries.swift */,
+				F20000000000000000000001 /* HealthKitCatalog.generated.swift */,
 				F10000000000000000000007 /* TypeRegistry.swift */,
 				F10000000000000000000008 /* Serializers.swift */,
 				F10000000000000000000009 /* WorkoutActivityName.swift */,
@@ -172,6 +193,9 @@
 		A10000000000000000000007 /* Support */ = {
 			isa = PBXGroup;
 			children = (
+				F20000000000000000000007 /* ObjCExceptions.h */,
+				F20000000000000000000006 /* ObjCExceptions.m */,
+				F20000000000000000000005 /* ObjC.swift */,
 				F1000000000000000000000F /* Gzip.swift */,
 				F10000000000000000000010 /* Keychain.swift */,
 				F10000000000000000000011 /* LogStore.swift */,
@@ -194,6 +218,7 @@
 		A10000000000000000000009 /* PulsoTests */ = {
 			isa = PBXGroup;
 			children = (
+				F20000000000000000000009 /* HealthKitCatalogTests.swift */,
 				F1000000000000000000001C /* SerializerTests.swift */,
 				F1000000000000000000001D /* OutboxTests.swift */,
 				F1000000000000000000001E /* GzipTests.swift */,
@@ -304,6 +329,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B20000000000000000000006 /* ObjCExceptions.m in Sources */,
+				B20000000000000000000005 /* ObjC.swift in Sources */,
+				B20000000000000000000004 /* HealthAuthorization.swift in Sources */,
+				B20000000000000000000003 /* Snapshots.swift in Sources */,
+				B20000000000000000000002 /* HealthQueries.swift in Sources */,
+				B20000000000000000000001 /* HealthKitCatalog.generated.swift in Sources */,
 				B10000000000000000000001 /* PulsoApp.swift in Sources */,
 				B10000000000000000000002 /* AppServices.swift in Sources */,
 				B10000000000000000000003 /* SampleDTO.swift in Sources */,
@@ -333,6 +364,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B20000000000000000000007 /* HealthKitCatalogTests.swift in Sources */,
 				B1000000000000000000001C /* SerializerTests.swift in Sources */,
 				B1000000000000000000001D /* OutboxTests.swift in Sources */,
 				B1000000000000000000001E /* GzipTests.swift in Sources */,
@@ -478,6 +510,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Pulso/Pulso.entitlements;
+				SWIFT_OBJC_BRIDGING_HEADER = "Pulso/Pulso-Bridging-Header.h";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -505,6 +538,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Pulso/Pulso.entitlements;
+				SWIFT_OBJC_BRIDGING_HEADER = "Pulso/Pulso-Bridging-Header.h";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;

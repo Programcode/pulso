@@ -50,12 +50,18 @@ struct StatusView: View {
                     }
                 }
 
+                Section {
+                    LabeledContent("Types with data", value: "\(typesWithData.count) of \(enabledKeys.count) enabled")
+                } footer: {
+                    Text("Types appear below once something was delivered. HealthKit won't say whether an empty type is unauthorized or simply has no data (Health app → Sharing).")
+                }
+
                 ForEach(TypeRegistry.groups, id: \.self) { group in
-                    let types = enabledTypes.filter { $0.group == group }
-                    if !types.isEmpty {
+                    let rows = rowsWithData(in: group)
+                    if !rows.isEmpty {
                         Section(group) {
-                            ForEach(types) { type in
-                                typeRow(type)
+                            ForEach(rows) { row in
+                                typeRow(key: row.key, name: row.name)
                             }
                         }
                     }
@@ -91,34 +97,42 @@ struct StatusView: View {
         }
     }
 
-    private var enabledTypes: [SyncedType] {
-        TypeRegistry.all.filter { services.settings.isEnabled($0.key) }
+    private var enabledKeys: [String] {
+        (TypeRegistry.snapshots.map(\.key) + TypeRegistry.all.map(\.key)).filter { services.settings.isEnabled($0) }
+    }
+
+    private var typesWithData: [String] {
+        enabledKeys.filter { (status.typeStatus[$0]?.totalDelivered ?? 0) > 0 }
+    }
+
+    private struct Row: Identifiable {
+        let key: String
+        let name: String
+        var id: String { key }
+    }
+
+    private func rowsWithData(in group: String) -> [Row] {
+        let rows = TypeRegistry.snapshots.filter { $0.group == group }.map { Row(key: $0.key, name: $0.displayName) }
+            + TypeRegistry.all.filter { $0.group == group }.map { Row(key: $0.key, name: $0.displayName) }
+        return rows.filter { services.settings.isEnabled($0.key) && (status.typeStatus[$0.key]?.totalDelivered ?? 0) > 0 }
     }
 
     @ViewBuilder
-    private func typeRow(_ type: SyncedType) -> some View {
+    private func typeRow(key: String, name: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(type.displayName)
-            Group {
-                if let ts = status.typeStatus[type.key], ts.totalDelivered > 0 {
-                    HStack(spacing: 4) {
-                        Text("\(ts.totalDelivered) delivered")
-                        if let checked = ts.lastChecked {
-                            Text("· checked")
-                            Text(checked, style: .relative)
-                            Text("ago")
-                        }
+            Text(name)
+            if let ts = status.typeStatus[key] {
+                HStack(spacing: 4) {
+                    Text("\(ts.totalDelivered) delivered")
+                    if let checked = ts.lastChecked {
+                        Text("· checked")
+                        Text(checked, style: .relative)
+                        Text("ago")
                     }
-                } else if status.typeStatus[type.key]?.lastChecked != nil {
-                    // F1: HealthKit won't say whether read access was denied —
-                    // "no data" and "no permission" look identical.
-                    Text("No data yet — or Health access not granted (Health app → Sharing)")
-                } else {
-                    Text("Waiting for first sync")
                 }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
         }
     }
 }
