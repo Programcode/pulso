@@ -21,9 +21,9 @@ struct StatusView: View {
                     }
                 }
 
-                if services.settings.baseURL == nil {
+                if !services.settings.destinations.contains(where: { $0.enabled && $0.isConfigured }) {
                     Section {
-                        Label("Set your server address in Settings", systemImage: "exclamationmark.triangle")
+                        Label("Add a destination in Settings", systemImage: "exclamationmark.triangle")
                             .foregroundStyle(.orange)
                     }
                 }
@@ -68,18 +68,33 @@ struct StatusView: View {
                 }
 
                 Section("Delivery") {
-                    LabeledContent("Pending batches", value: "\(status.outboxPending)")
-                    if let retry = status.outboxNextRetry, retry > Date() {
-                        LabeledContent("Next retry") {
-                            Text(retry, style: .relative)
+                    if let finished = status.lastSyncFinished {
+                        LabeledContent("Last sync") {
+                            Text(finished, style: .relative)
                         }
                     }
-                    if let response = status.lastResponse {
-                        LabeledContent("Last server response") {
-                            Text(response)
+                    if let summary = status.lastSyncSummary {
+                        Text(summary).font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(services.settings.destinations.filter(\.enabled)) { destination in
+                        let state = status.destinationStatus[destination.id] ?? DestinationStatus()
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text(destination.name)
+                                Spacer()
+                                Text("\(state.pending) queued").foregroundStyle(state.pending > 0 ? .orange : .secondary)
+                            }
+                            if let retry = state.nextRetry, retry > Date() {
+                                HStack(spacing: 4) {
+                                    Text("retry")
+                                    Text(retry, style: .relative)
+                                }
                                 .font(.caption)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.trailing)
+                                .foregroundStyle(.secondary)
+                            }
+                            if let response = state.lastResponse {
+                                Text(response).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            }
                         }
                     }
                 }

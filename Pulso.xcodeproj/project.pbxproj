@@ -43,6 +43,14 @@
 		B20000000000000000000005 /* ObjC.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000005 /* ObjC.swift */; };
 		B20000000000000000000006 /* ObjCExceptions.m in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000006 /* ObjCExceptions.m */; };
 		B20000000000000000000007 /* HealthKitCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000009 /* HealthKitCatalogTests.swift */; };
+		B20000000000000000000008 /* Destination.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000000A /* Destination.swift */; };
+		B20000000000000000000009 /* Transports.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000000B /* Transports.swift */; };
+		B2000000000000000000000A /* MQTTPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000000C /* MQTTPublisher.swift */; };
+		B2000000000000000000000B /* OutboxHub.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000000D /* OutboxHub.swift */; };
+		B2000000000000000000000C /* DestinationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000000E /* DestinationsView.swift */; };
+		B2000000000000000000000D /* MQTTPacketTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000000F /* MQTTPacketTests.swift */; };
+		B2000000000000000000000E /* DestinationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000010 /* DestinationTests.swift */; };
+		B2000000000000000000000F /* Intents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000011 /* Intents.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -98,6 +106,14 @@
 		F20000000000000000000007 /* ObjCExceptions.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ObjCExceptions.h; sourceTree = "<group>"; };
 		F20000000000000000000008 /* Pulso-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Pulso-Bridging-Header.h; sourceTree = "<group>"; };
 		F20000000000000000000009 /* HealthKitCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitCatalogTests.swift; sourceTree = "<group>"; };
+		F2000000000000000000000A /* Destination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Destination.swift; sourceTree = "<group>"; };
+		F2000000000000000000000B /* Transports.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transports.swift; sourceTree = "<group>"; };
+		F2000000000000000000000C /* MQTTPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MQTTPublisher.swift; sourceTree = "<group>"; };
+		F2000000000000000000000D /* OutboxHub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboxHub.swift; sourceTree = "<group>"; };
+		F2000000000000000000000E /* DestinationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationsView.swift; sourceTree = "<group>"; };
+		F2000000000000000000000F /* MQTTPacketTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MQTTPacketTests.swift; sourceTree = "<group>"; };
+		F20000000000000000000010 /* DestinationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationTests.swift; sourceTree = "<group>"; };
+		F20000000000000000000011 /* Intents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Intents.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -135,6 +151,7 @@
 				A10000000000000000000004 /* Model */,
 				A10000000000000000000005 /* Health */,
 				A10000000000000000000006 /* Sync */,
+				A2000000000000000000000B /* Destinations */,
 				A10000000000000000000007 /* Support */,
 				A10000000000000000000008 /* UI */,
 				F10000000000000000000017 /* Assets.xcassets */,
@@ -147,6 +164,7 @@
 		A10000000000000000000003 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				F20000000000000000000011 /* Intents.swift */,
 				F10000000000000000000001 /* PulsoApp.swift */,
 				F10000000000000000000002 /* AppServices.swift */,
 			);
@@ -182,6 +200,7 @@
 		A10000000000000000000006 /* Sync */ = {
 			isa = PBXGroup;
 			children = (
+				F2000000000000000000000D /* OutboxHub.swift */,
 				F1000000000000000000000B /* SyncEngine.swift */,
 				F1000000000000000000000C /* Outbox.swift */,
 				F1000000000000000000000D /* Uploader.swift */,
@@ -207,6 +226,7 @@
 		A10000000000000000000008 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				F2000000000000000000000E /* DestinationsView.swift */,
 				F10000000000000000000013 /* RootView.swift */,
 				F10000000000000000000014 /* StatusView.swift */,
 				F10000000000000000000015 /* SettingsView.swift */,
@@ -218,6 +238,8 @@
 		A10000000000000000000009 /* PulsoTests */ = {
 			isa = PBXGroup;
 			children = (
+				F20000000000000000000010 /* DestinationTests.swift */,
+				F2000000000000000000000F /* MQTTPacketTests.swift */,
 				F20000000000000000000009 /* HealthKitCatalogTests.swift */,
 				F1000000000000000000001C /* SerializerTests.swift */,
 				F1000000000000000000001D /* OutboxTests.swift */,
@@ -236,6 +258,16 @@
 				F1000000000000000000001B /* PulsoTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		A2000000000000000000000B /* Destinations */ = {
+			isa = PBXGroup;
+			children = (
+				F2000000000000000000000C /* MQTTPublisher.swift */,
+				F2000000000000000000000B /* Transports.swift */,
+				F2000000000000000000000A /* Destination.swift */,
+			);
+			path = Destinations;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -329,6 +361,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B2000000000000000000000F /* Intents.swift in Sources */,
+				B2000000000000000000000C /* DestinationsView.swift in Sources */,
+				B2000000000000000000000B /* OutboxHub.swift in Sources */,
+				B2000000000000000000000A /* MQTTPublisher.swift in Sources */,
+				B20000000000000000000009 /* Transports.swift in Sources */,
+				B20000000000000000000008 /* Destination.swift in Sources */,
 				B20000000000000000000006 /* ObjCExceptions.m in Sources */,
 				B20000000000000000000005 /* ObjC.swift in Sources */,
 				B20000000000000000000004 /* HealthAuthorization.swift in Sources */,
@@ -364,6 +402,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B2000000000000000000000E /* DestinationTests.swift in Sources */,
+				B2000000000000000000000D /* MQTTPacketTests.swift in Sources */,
 				B20000000000000000000007 /* HealthKitCatalogTests.swift in Sources */,
 				B1000000000000000000001C /* SerializerTests.swift in Sources */,
 				B1000000000000000000001D /* OutboxTests.swift in Sources */,

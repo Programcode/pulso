@@ -8,6 +8,8 @@ enum SyncReason: CustomStringConvertible, Sendable {
     case backgroundRefresh
     case settingsChanged
     case reimport
+    case intent(String)
+    case processing
 
     var description: String {
         switch self {
@@ -17,6 +19,8 @@ enum SyncReason: CustomStringConvertible, Sendable {
         case .backgroundRefresh: "background refresh"
         case .settingsChanged: "settings changed"
         case .reimport: "full re-import"
+        case .intent(let name): "shortcut: \(name)"
+        case .processing: "background processing"
         }
     }
 }
@@ -31,6 +35,38 @@ enum CatchUp {
     /// future-dated server timestamp would otherwise produce an empty
     /// bounded query that persists a store-wide anchor and permanently
     /// skips the type's history.
+    /// Combines several servers' /latest answers: a type counts only if
+    /// every server has it, at the earliest of their timestamps.
+    static func earliest(_ answers: [[String: String]]) -> [String: String] {
+        guard var merged = answers.first else { return [:] }
+        for answer in answers.dropFirst() {
+            for (type, value) in merged {
+                guard let other = answer[type] else {
+                    merged[type] = nil
+                    continue
+                }
+                // A timestamp that doesn't parse says nothing safe about
+                // what that server holds: no catch-up for the type.
+                guard let a = parse(value), let b = parse(other) else {
+                    merged[type] = nil
+                    continue
+                }
+                if b < a {
+                    merged[type] = other
+                }
+            }
+        }
+        return merged
+    }
+
+    private static func parse(_ raw: String) -> Date? {
+        let strict = ISO8601DateFormatter()
+        strict.formatOptions = [.withInternetDateTime]
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return strict.date(from: raw) ?? fractional.date(from: raw)
+    }
+
     static func cutoffs(fromLatest latest: [String: String], now: Date = Date()) -> [String: Date] {
         let strict = ISO8601DateFormatter()
         strict.formatOptions = [.withInternetDateTime]
@@ -43,23 +79,23 @@ enum CatchUp {
     }
 }
 
-/// Per enabled type: run an anchored query from the last anchor, hand the
-/// results to the outbox, and let the outbox persist the new anchor once the
-/// server ACKs. An in-memory anchor cache leads the persisted one so
-/// overlapping triggers don't re-read samples that are already queued; after
-/// a crash the cache is gone, the persisted anchor wins, and any re-read
-/// samples dedupe server-side by uuid.
+/// Per enabled type: run an anchored query from the last anchor, write the
+/// results into every destination's durable queue, then persist the new
+/// anchor. The data is on disk before the anchor moves, and each queue
+/// deletes a batch only once its destination accepts it; a crash between
+/// the two re-reads samples that receivers dedupe by uuid.
 actor SyncEngine {
     static let queryLimit = 5000
 
     private let healthStore: HKHealthStore
     private let queries: HealthQueries
     private let anchors: AnchorStore
-    private let outbox: Outbox
+    private let outbox: OutboxHub
     private let log: LogStore
     private let status: AppStatus
     /// GET /latest from the configured server; nil when unavailable.
-    private let latestHints: @Sendable () async -> [String: String]?
+    /// GET /latest from the given destinations; nil when unavailable.
+    private let latestHints: @Sendable ([Destination]) async -> [String: String]?
     private var anchorCache: [String: HKQueryAnchor] = [:]
     /// Snapshot state as last queued; survives in memory between passes.
     private var snapshotCache: [String: SnapshotState] = [:]
@@ -71,13 +107,15 @@ actor SyncEngine {
     private var authBlocked: Set<String> = []
     /// GET /latest result (including failure) cached briefly so background
     /// wakes don't pay a network round-trip per pass.
-    private var latestFetch: (at: Date, hints: [String: String]?)?
+    /// Keyed by the destinations that answered: a hint is only valid for
+    /// the exact set of destinations it was gathered from.
+    private var latestFetch: (at: Date, destinations: String, hints: [String: String]?)?
     private static let latestCacheInterval: TimeInterval = 15 * 60
 
     init(
-        healthStore: HKHealthStore, anchors: AnchorStore, outbox: Outbox,
+        healthStore: HKHealthStore, anchors: AnchorStore, outbox: OutboxHub,
         log: LogStore, status: AppStatus,
-        latestHints: @escaping @Sendable () async -> [String: String]? = { nil }
+        latestHints: @escaping @Sendable ([Destination]) async -> [String: String]? = { _ in nil }
     ) {
         self.healthStore = healthStore
         queries = HealthQueries(store: healthStore)
@@ -103,11 +141,12 @@ actor SyncEngine {
     }
 
     private func performSync(_ reason: SyncReason, only keys: Set<String>?) async {
-        guard AppSettings.currentTarget() != nil else {
-            await log.info("sync skipped (\(reason)): no server configured")
+        guard await outbox.hasActiveDestination() else {
+            await log.info("sync skipped (\(reason)): no destination configured")
             return
         }
         await status.setSyncing(true)
+        await status.recordSyncStarted()
         // Types this OS refused at authorization would only fail their query.
         let refused = HealthAuthorization.lastRejected()
         let enabled = AppSettings.currentEnabledTypes().filter {
@@ -117,9 +156,9 @@ actor SyncEngine {
         // A user-visible pass may follow a permission grant — retry types
         // that were failing. Background wakes keep them excluded.
         switch reason {
-        case .manual, .foreground, .settingsChanged, .reimport:
+        case .manual, .foreground, .settingsChanged, .reimport, .intent:
             authBlocked.removeAll()
-        case .observer, .backgroundRefresh:
+        case .observer, .backgroundRefresh, .processing:
             break
         }
 
@@ -142,9 +181,11 @@ actor SyncEngine {
         // an interleaved or resumed pass would otherwise catch-up against
         // the fully-populated server and defeat the re-import.
         var cutoffs: [String: Date] = [:]
+        var catchUpKey: String?
         let reimporting = UserDefaults.standard.bool(forKey: SettingsKeys.reimportPending)
         if !reimporting && !missing.isEmpty {
-            if let latest = await cachedLatestHints() {
+            if let (latest, key) = await cachedLatestHints() {
+                catchUpKey = key
                 let parsed = CatchUp.cutoffs(fromLatest: latest)
                 if parsed.count < latest.count {
                     await log.warn("server /latest: \(latest.count - parsed.count) unparseable timestamp(s) ignored")
@@ -160,7 +201,7 @@ actor SyncEngine {
         var anyFailed = false
         for type in enabled {
             do {
-                queued += try await sync(type, anchor: resolvedAnchors[type.key], cutoffs: cutoffs)
+                queued += try await sync(type, anchor: resolvedAnchors[type.key], cutoffs: cutoffs, catchUpKey: catchUpKey)
             } catch {
                 anyFailed = true
                 authBlocked.insert(type.key)
@@ -168,15 +209,13 @@ actor SyncEngine {
             }
         }
         // Snapshots have no observer of their own; they ride along on every
-        // full pass.
-        if keys == nil {
-            for source in AppSettings.currentEnabledSnapshots() {
-                do {
-                    queued += try await syncSnapshot(source)
-                } catch {
-                    anyFailed = true
-                    await log.error("\(source.key): \(error.localizedDescription)")
-                }
+        // full pass, or when a shortcut names them.
+        for source in AppSettings.currentEnabledSnapshots() where keys?.contains(source.key) ?? true {
+            do {
+                queued += try await syncSnapshot(source)
+            } catch {
+                anyFailed = true
+                await log.error("\(source.key): \(error.localizedDescription)")
             }
         }
         if reimporting && !anyFailed && keys == nil {
@@ -185,26 +224,139 @@ actor SyncEngine {
         }
         let force: Bool
         switch reason {
-        case .manual, .foreground, .settingsChanged, .reimport: force = true
+        case .manual, .foreground, .settingsChanged, .reimport, .intent, .processing: force = true
         case .observer, .backgroundRefresh: force = false
         }
         await outbox.drain(force: force)
+        let pending = await outbox.pendingCount()
+        let failed = authBlocked.sorted()
+        var summary = "\(reason): queued \(queued) sample(s), \(pending) batch(es) waiting"
+        if !failed.isEmpty {
+            summary += ", \(failed.count) type(s) failing (\(failed.prefix(5).joined(separator: ", ")))"
+        }
+        await status.recordSyncFinished(summary)
         await status.setSyncing(false)
         if queued > 0 {
             await log.info("sync (\(reason)): queued \(queued) sample(s)")
         }
     }
 
-    private func cachedLatestHints() async -> [String: String]? {
-        if let cached = latestFetch, Date().timeIntervalSince(cached.at) < Self.latestCacheInterval {
-            return cached.hints
+    /// Re-sends what HealthKit holds between `start` and `end` (open ends
+    /// mean all of it) without touching anchors: the backfill shortcut.
+    /// Serialized with sync passes.
+    func resend(only keys: Set<String>?, start: Date?, end: Date?, reason: SyncReason) async -> String {
+        let previous = chain
+        let task = Task { () -> String in
+            await previous?.value
+            return await self.performResend(only: keys, start: start, end: end, reason: reason)
         }
-        let hints = await latestHints()
-        latestFetch = (Date(), hints)
-        return hints
+        chain = Task { _ = await task.value }
+        return await task.value
     }
 
-    private func sync(_ type: SyncedType, anchor resolvedAnchor: HKQueryAnchor?, cutoffs: [String: Date]) async throws -> Int {
+    private func performResend(only keys: Set<String>?, start: Date?, end: Date?, reason: SyncReason) async -> String {
+        guard await outbox.hasActiveDestination() else { return "No destination is configured." }
+        await status.setSyncing(true)
+        await status.recordSyncStarted()
+        let refused = HealthAuthorization.lastRejected()
+        let types = AppSettings.currentEnabledTypes().filter {
+            !refused.contains($0.sampleType.identifier) && (keys?.contains($0.key) ?? true)
+        }
+        let predicate = (start != nil || end != nil) ? HKQuery.predicateForSamples(withStart: start, end: end) : nil
+        var queued = 0
+        var failed: [String] = []
+        for type in types {
+            do {
+                var anchor: HKQueryAnchor?
+                while true {
+                    let descriptor = HKAnchoredObjectQueryDescriptor(
+                        predicates: [.sample(type: type.sampleType, predicate: predicate)],
+                        anchor: anchor, limit: type.queryLimit
+                    )
+                    let result = try await descriptor.result(for: healthStore)
+                    var dtos: [SampleDTO] = []
+                    for sample in result.addedSamples {
+                        guard let dto = type.serialize(sample, .live) else { continue }
+                        dtos.append(try await type.enrich?(queries, dto, sample) ?? dto)
+                    }
+                    if !dtos.isEmpty {
+                        try await outbox.enqueue(typeKey: type.key, elements: dtos.map(BatchElement.sample))
+                        queued += dtos.count
+                        await log.info("\(type.key): re-queued \(dtos.count) sample(s)")
+                    }
+                    anchor = normalize(result.newAnchor)
+                    if result.addedSamples.count < type.queryLimit || anchor == nil { break }
+                }
+            } catch {
+                failed.append(type.key)
+                await log.error("\(type.key): \(error.localizedDescription)")
+            }
+        }
+        for source in AppSettings.currentEnabledSnapshots() where keys?.contains(source.key) ?? true {
+            do {
+                // Re-sends each record's current version (same uuid); a record
+                // that changed since the last sync goes out with the next one.
+                let state = snapshotCache[source.key]
+                    ?? anchors.loadRaw(source.key).flatMap { try? JSONDecoder().decode(SnapshotState.self, from: $0) }
+                guard let state else { continue }
+                let records = try await source.read(queries, .live, nil).compactMap { record -> SampleDTO? in
+                    guard Self.overlaps(record, start: start, end: end),
+                          let entry = state.entries[record.uuid],
+                          entry.fingerprint == SnapshotState.fingerprint(record) else { return nil }
+                    return state.versioned(record, version: entry.version)
+                }
+                if !records.isEmpty {
+                    try await outbox.enqueue(typeKey: source.key, elements: records.map(BatchElement.sample))
+                    queued += records.count
+                }
+            } catch {
+                failed.append(source.key)
+                await log.error("\(source.key): \(error.localizedDescription)")
+            }
+        }
+        await outbox.drain(force: true)
+        let pending = await outbox.pendingCount()
+        var summary = "\(reason): re-sent \(queued) record(s) from \(types.count) type(s), \(pending) batch(es) waiting"
+        if !failed.isEmpty {
+            summary += ", failed: \(failed.prefix(5).joined(separator: ", "))"
+        }
+        await status.recordSyncFinished(summary)
+        await status.setSyncing(false)
+        await log.info(summary)
+        return summary
+    }
+
+    /// Whether a record's interval touches [start, end]; open ends match all.
+    static func overlaps(_ record: SampleDTO, start: Date?, end: Date?) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        guard let recordStart = formatter.date(from: record.start), let recordEnd = formatter.date(from: record.end) else {
+            return true
+        }
+        if let start, recordEnd < start { return false }
+        if let end, recordStart > end { return false }
+        return true
+    }
+
+    /// Hints plus the key of the destination set they belong to. A set that
+    /// changed while the request was in flight discards the answer.
+    private func cachedLatestHints() async -> (hints: [String: String], key: String)? {
+        // One snapshot of the destination list gives both the key and the
+        // servers asked, so the key always names the set that answered.
+        let snapshot = AppSettings.receivingDestinations()
+        let destinations = AppSettings.catchUpKey(snapshot)
+        if let cached = latestFetch, cached.destinations == destinations,
+           Date().timeIntervalSince(cached.at) < Self.latestCacheInterval {
+            return cached.hints.map { ($0, destinations) }
+        }
+        let hints = await latestHints(snapshot)
+        guard AppSettings.catchUpKey(AppSettings.receivingDestinations()) == destinations else { return nil }
+        latestFetch = (Date(), destinations, hints)
+        return hints.map { ($0, destinations) }
+    }
+
+    private func sync(
+        _ type: SyncedType, anchor resolvedAnchor: HKQueryAnchor?, cutoffs: [String: Date], catchUpKey: String?
+    ) async throws -> Int {
         var anchor = resolvedAnchor
         // Date-bounding a nil-anchor query skips the historical read while
         // still returning a store-wide anchor, so later incremental syncs
@@ -228,7 +380,13 @@ actor SyncEngine {
 
             if added.isEmpty && deleted.isEmpty {
                 // Nothing new — the anchor covers no undelivered samples, so
-                // persisting it immediately is safe.
+                // persisting it immediately is safe, unless it ends a
+                // date-bounded first read whose destination set has changed.
+                if datePredicate != nil, let catchUpKey,
+                   AppSettings.catchUpKey(AppSettings.receivingDestinations()) != catchUpKey {
+                    latestFetch = nil
+                    return queued
+                }
                 if let newAnchor {
                     anchorCache[type.key] = newAnchor
                     anchors.save(newAnchor, for: type.key)
@@ -252,9 +410,19 @@ actor SyncEngine {
             if !deleted.isEmpty {
                 elements.append(.tombstone(deleted))
             }
-            let anchorData = newAnchor.flatMap { anchors.archive($0) }
-            try await outbox.enqueue(typeKey: type.key, elements: elements, anchor: anchorData)
+            do {
+                // A date-bounded first read is only right for the destinations
+                // the hints came from.
+                try await outbox.enqueue(
+                    typeKey: type.key, elements: elements, catchUpKey: datePredicate == nil ? nil : catchUpKey
+                )
+            } catch OutboxHub.EnqueueError.destinationsChanged {
+                latestFetch = nil
+                await log.info("\(type.key): destinations changed during catch-up — will re-check on the next pass")
+                return queued
+            }
             if let newAnchor {
+                anchors.save(newAnchor, for: type.key)
                 anchorCache[type.key] = newAnchor
                 anchor = newAnchor
             }
@@ -324,7 +492,7 @@ actor SyncEngine {
             await log.error("\(key): unreadable snapshot journal discarded")
             return
         }
-        try await outbox.enqueue(typeKey: key, elements: journal.elements, anchor: nil)
+        try await outbox.enqueue(typeKey: key, elements: journal.elements)
         try anchors.writeRaw(JSONEncoder().encode(journal.state), for: key)
         try FileManager.default.removeItem(at: url)
         snapshotCache[key] = journal.state

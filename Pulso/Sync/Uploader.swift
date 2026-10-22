@@ -34,7 +34,7 @@ struct HTTPUploader: Uploading {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         let started = Date()
-        let (data, response) = try await session.upload(for: request, from: body)
+        let (data, response) = try await session.upload(for: request, from: body, delegate: NoRedirects.shared)
         return UploadResult(
             status: (response as? HTTPURLResponse)?.statusCode ?? 0,
             bodySnippet: String(decoding: data.prefix(300), as: UTF8.self),
@@ -42,17 +42,18 @@ struct HTTPUploader: Uploading {
         )
     }
 
-    /// GET <base>/latest — per-type newest sample timestamp on the server.
+    /// GET <…>/latest — per-type newest sample timestamp on the server.
     /// nil on any failure (older servers without the endpoint included);
     /// callers fall back to a full backfill.
-    func fetchLatest(base: URL, token: String?) async -> [String: String]? {
-        guard let url = URL(string: base.absoluteString + "/latest") else { return nil }
+    func fetchLatest(url: URL, token: String?) async -> [String: String]? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         if let token, !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        guard let (data, response) = try? await session.data(for: request),
+        // The request carries the token: never let a redirect take it elsewhere.
+        // A 3xx is non-200, so the caller falls back to a full backfill.
+        guard let (data, response) = try? await session.data(for: request, delegate: NoRedirects.shared),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return try? JSONDecoder().decode([String: String].self, from: data)
     }
@@ -62,10 +63,16 @@ struct HTTPUploader: Uploading {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         do {
-            let (data, response) = try await session.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            // Same redirect rule as deliveries, so Test can't pass a URL
+            // that every upload would fail on.
+            let (data, response) = try await session.data(for: request, delegate: NoRedirects.shared)
+            let http = response as? HTTPURLResponse
+            let status = http?.statusCode ?? 0
             if (200 ..< 300).contains(status) {
                 return "OK — HTTP \(status)"
+            }
+            if (300 ..< 400).contains(status), let location = http?.value(forHTTPHeaderField: "Location") {
+                return "HTTP \(status): the server redirects to \(location) — use that address instead"
             }
             return "HTTP \(status): \(String(decoding: data.prefix(120), as: UTF8.self))"
         } catch {

@@ -17,7 +17,7 @@ struct PulsoApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
-    let services = AppServices()
+    let services = AppServices.shared
 
     func application(
         _ application: UIApplication,

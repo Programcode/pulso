@@ -15,14 +15,23 @@ enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
-    /// nil or empty deletes the item.
+    /// nil or empty deletes the item. An existing item is updated in place,
+    /// so a concurrent reader never sees it missing mid-write.
     static func set(_ value: String?, for account: String) {
-        SecItemDelete(base(account) as CFDictionary)
-        guard let value, !value.isEmpty else { return }
-        var attributes = base(account)
-        attributes[kSecValueData as String] = Data(value.utf8)
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(attributes as CFDictionary, nil)
+        guard let value, !value.isEmpty else {
+            SecItemDelete(base(account) as CFDictionary)
+            return
+        }
+        let data = Data(value.utf8)
+        let update: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        if SecItemUpdate(base(account) as CFDictionary, update as CFDictionary) == errSecItemNotFound {
+            var attributes = base(account)
+            attributes.merge(update) { _, new in new }
+            SecItemAdd(attributes as CFDictionary, nil)
+        }
     }
 
     private static func base(_ account: String) -> [String: Any] {
