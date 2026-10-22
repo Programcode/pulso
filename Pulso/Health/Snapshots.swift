@@ -205,6 +205,8 @@ enum Snapshots {
 /// a random epoch for this state, a version counter), and the version it
 /// replaces is tombstoned. Receivers that keep the first copy of a uuid and
 /// receivers that upsert both end up with only the latest version.
+/// SyncEngine journals each batch with the state it leads to, so the
+/// counter can't move backwards across a crash.
 struct SnapshotState: Codable, Equatable, Sendable {
     struct Entry: Codable, Equatable, Sendable {
         /// nil once the record was deleted (its last version tombstoned).
@@ -214,10 +216,6 @@ struct SnapshotState: Codable, Equatable, Sendable {
 
     var epoch: String
     var entries: [String: Entry] = [:]
-    /// Highest version handed out per key, saved *before* a batch is
-    /// queued. A reservation above the committed version means a crash may
-    /// have queued that version: it is superseded and never reused.
-    var reserved: [String: Int] = [:]
 
     static func fresh() -> SnapshotState {
         SnapshotState(epoch: String(UUID().uuidString.prefix(8)).lowercased())
@@ -243,52 +241,22 @@ struct SnapshotState: Codable, Equatable, Sendable {
             let key = record.uuid
             let fingerprint = Self.fingerprint(record)
             let previous = entries[key]
-            let uncommitted = uncommittedVersions(key)
-            guard previous?.fingerprint != fingerprint || !uncommitted.isEmpty else { continue }
-            superseded += liveVersions(key)
-            let version = max(previous?.version ?? 0, reserved[key] ?? 0) + 1
+            guard previous?.fingerprint != fingerprint else { continue }
+            if let previous, previous.fingerprint != nil {
+                superseded.append(uuid(key, version: previous.version))
+            }
+            let version = (previous?.version ?? 0) + 1
             entries[key] = Entry(fingerprint: fingerprint, version: version)
-            reserved[key] = version
             send.append(versioned(record, version: version))
         }
         if complete && !records.isEmpty {
             let present = Set(records.map(\.uuid))
-            for key in entries.keys where !present.contains(key) {
-                let live = liveVersions(key)
-                guard !live.isEmpty else { continue }
-                superseded += live
+            for (key, entry) in entries where entry.fingerprint != nil && !present.contains(key) {
+                superseded.append(uuid(key, version: entry.version))
                 entries[key]?.fingerprint = nil
-                reserved[key] = max(entries[key]?.version ?? 0, reserved[key] ?? 0)
-                entries[key]?.version = reserved[key] ?? 0
             }
         }
         return (send, superseded.sorted())
-    }
-
-    /// Versions handed out but never committed (a crash between saving the
-    /// reservation and saving the state).
-    private func uncommittedVersions(_ key: String) -> [Int] {
-        let committed = entries[key]?.version ?? 0
-        let highest = reserved[key] ?? committed
-        return highest > committed ? Array(committed + 1 ... highest) : []
-    }
-
-    /// uuids of versions a receiver may hold as current for `key`.
-    private func liveVersions(_ key: String) -> [String] {
-        var versions = uncommittedVersions(key)
-        if let entry = entries[key], entry.fingerprint != nil {
-            versions.insert(entry.version, at: 0)
-        }
-        return versions.map { uuid(key, version: $0) }
-    }
-
-    /// What to save before queueing: the committed entries of `before`
-    /// with this state's reservations, so a crash before the state itself
-    /// is saved can't hand the same versions out again.
-    func reservation(committed before: SnapshotState?) -> SnapshotState {
-        var out = self
-        out.entries = before?.entries ?? [:]
-        return out
     }
 
     /// The record as sent: versioned uuid, stable key in details.recordKey.

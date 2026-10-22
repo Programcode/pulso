@@ -364,33 +364,63 @@ actor SyncEngine {
         }
     }
 
+    /// A snapshot batch and the state it leads to, written as one file
+    /// before anything is queued.
+    private struct SnapshotJournal: Codable {
+        let state: SnapshotState
+        let elements: [BatchElement]
+    }
+
+    private func journalURL(_ key: String) -> URL {
+        anchors.directory.appendingPathComponent("\(key).journal")
+    }
+
     /// Reads a snapshot source and queues new versions of the records whose
-    /// content changed (see SnapshotState). The state is saved once the
-    /// batch is on disk, like an anchor once its samples are queued.
+    /// content changed (see SnapshotState). Queueing the batch and saving
+    /// the state are separate writes, so both go through a journal: if
+    /// either fails, or the app dies between them, the next pass replays
+    /// the same batch (same uuids, harmless to receivers) and then saves
+    /// the state, before reading anything new.
     private func syncSnapshot(_ source: SnapshotSource) async throws -> Int {
+        try await replaySnapshotJournal(source.key)
         let known = snapshotCache[source.key]
             ?? anchors.loadRaw(source.key).flatMap { try? JSONDecoder().decode(SnapshotState.self, from: $0) }
         let records = try await source.read(queries, .live, known?.fingerprints)
         var state = known ?? .fresh()
         let (send, superseded) = state.apply(records, complete: source.complete)
         await status.recordChecked(source.key)
-        let encoded = try JSONEncoder().encode(state)
         guard !send.isEmpty || !superseded.isEmpty else {
-            if known == nil { anchors.saveRaw(encoded, for: source.key) }
+            if known == nil {
+                try anchors.writeRaw(JSONEncoder().encode(state), for: source.key)
+            }
             return 0
         }
         var elements = send.map(BatchElement.sample)
         if !superseded.isEmpty {
             elements.append(.tombstone(superseded))
         }
-        // Reserve the new versions durably first: the batch and the state
-        // are two writes, and a crash between them must not reuse a uuid.
-        anchors.saveRaw(try JSONEncoder().encode(state.reservation(committed: known)), for: source.key)
-        try await outbox.enqueue(typeKey: source.key, elements: elements)
-        anchors.saveRaw(encoded, for: source.key)
-        snapshotCache[source.key] = state
+        let journal = SnapshotJournal(state: state, elements: elements)
+        try Wire.fileEncoder().encode(journal).write(to: journalURL(source.key), options: .atomic)
+        try await replaySnapshotJournal(source.key)
         await log.info("\(source.key): queued \(send.count) new version(s), \(superseded.count) superseded")
         return send.count
+    }
+
+    private func replaySnapshotJournal(_ key: String) async throws {
+        let url = journalURL(key)
+        guard let data = try? Data(contentsOf: url) else { return }
+        let journal: SnapshotJournal
+        do {
+            journal = try Wire.fileDecoder().decode(SnapshotJournal.self, from: data)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            await log.error("\(key): unreadable snapshot journal discarded")
+            return
+        }
+        try await outbox.enqueue(typeKey: key, elements: journal.elements)
+        try anchors.writeRaw(JSONEncoder().encode(journal.state), for: key)
+        try FileManager.default.removeItem(at: url)
+        snapshotCache[key] = journal.state
     }
 
     /// The SDK has flip-flopped on the optionality of `newAnchor`; funneling

@@ -155,27 +155,4 @@ final class HealthKitCatalogTests: XCTestCase {
         _ = window.apply([medication("d1", "x"), medication("d2", "y")], complete: false)
         XCTAssertEqual(window.apply([medication("d2", "y")], complete: false).superseded, [])
     }
-
-    /// A crash after the reservation was saved but before the state was:
-    /// the reserved version may have been queued, so it is superseded and
-    /// the next version skips past it, even if the content went back.
-    func testSnapshotReservationSurvivesACrashBeforeCommit() {
-        var committed = SnapshotState(epoch: "e")
-        _ = committed.apply([medication("m", "A")], complete: true) // m-e-v1 delivered
-
-        var working = committed
-        let queued = working.apply([medication("m", "B")], complete: true)
-        XCTAssertEqual(queued.send.map(\.uuid), ["m-e-v2"])
-        var afterCrash = working.reservation(committed: committed)
-        XCTAssertEqual(afterCrash.entries, committed.entries)
-
-        let next = afterCrash.apply([medication("m", "C")], complete: true)
-        XCTAssertEqual(next.send.map(\.uuid), ["m-e-v3"], "v2 may exist; it must not be reused")
-        XCTAssertEqual(next.superseded, ["m-e-v1", "m-e-v2"])
-
-        var reverted = working.reservation(committed: committed)
-        let back = reverted.apply([medication("m", "A")], complete: true)
-        XCTAssertEqual(back.send.map(\.uuid), ["m-e-v3"], "unchanged content still re-sent over an uncommitted version")
-        XCTAssertEqual(back.superseded, ["m-e-v1", "m-e-v2"])
-    }
 }

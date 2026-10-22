@@ -40,6 +40,11 @@ struct AnchorStore: Sendable {
         try? data.write(to: url(for: key), options: .atomic)
     }
 
+    /// Like saveRaw, but a failed write is the caller's to handle.
+    func writeRaw(_ data: Data, for key: String) throws {
+        try data.write(to: url(for: key), options: .atomic)
+    }
+
     func hasAnchor(_ key: String) -> Bool {
         FileManager.default.fileExists(atPath: url(for: key).path)
     }
