@@ -62,10 +62,14 @@ final class AppSettings {
         let previous = storedDestinations()
         var stripped = destinations
         for index in stripped.indices {
-            if stripped[index].isConfigured { stripped[index].wasConfigured = true }
+            // Once true, stays true: the copy being edited may never have
+            // seen the flag the saved copy got.
+            let saved = previous.first { $0.id == stripped[index].id }
+            stripped[index].wasConfigured = stripped[index].isConfigured || stripped[index].wasConfigured
+                || saved?.wasConfigured == true
             let destination = stripped[index]
             let kept = Set(destination.headers.map(\.id))
-            for old in previous.first(where: { $0.id == destination.id })?.headers ?? [] where !kept.contains(old.id) {
+            for old in saved?.headers ?? [] where !kept.contains(old.id) {
                 Keychain.set(nil, for: destination.headerValueAccount(old))
             }
             for headerIndex in stripped[index].headers.indices {

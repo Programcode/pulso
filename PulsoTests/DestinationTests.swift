@@ -192,4 +192,23 @@ final class DestinationTests: XCTestCase {
         XCTAssertEqual(decoded.first?.enabled, true)
         XCTAssertEqual(decoded.first?.wasConfigured, true, "a stored destination with a URL counts as configured")
     }
+
+    /// Clearing a URL in the session the destination was added must not
+    /// un-set wasConfigured: the in-memory copy never saw the flag.
+    func testWasConfiguredSurvivesSavingAnUnconfiguredCopy() {
+        let defaults = UserDefaults.standard
+        let saved = defaults.data(forKey: SettingsKeys.destinations)
+        defer { defaults.set(saved, forKey: SettingsKeys.destinations) }
+
+        var destination = Destination(name: "r", kind: .rest)
+        destination.url = "https://a.example/in"
+        AppSettings.storeDestinations([destination])
+        XCTAssertEqual(AppSettings.currentDestinations().first?.wasConfigured, true)
+
+        destination.url = ""
+        XCTAssertFalse(destination.wasConfigured, "the edited copy still has the original flag")
+        AppSettings.storeDestinations([destination])
+        XCTAssertEqual(AppSettings.currentDestinations().first?.wasConfigured, true)
+        XCTAssertEqual(AppSettings.receivingDestinations().map(\.id), [destination.id])
+    }
 }
