@@ -12,6 +12,9 @@ struct SyncedType: Identifiable {
         /// Not authorizable itself; readable when its member types are
         /// (blood pressure and food correlations).
         case viaComponents
+        /// Refused in the read set; readable for the medications the user
+        /// shares object by object (medication dose events).
+        case withMedications
     }
 
     let key: String // wire "type" value and persistence key
@@ -257,7 +260,7 @@ enum TypeRegistry {
         if #available(iOS 26.0, *) {
             types.append(SyncedType(
                 key: "medicationDoseEvent", displayName: "Medication Doses", group: Group.medications,
-                sampleType: HKObjectType.medicationDoseEventType(), frequency: .immediate,
+                sampleType: HKObjectType.medicationDoseEventType(), frequency: .immediate, access: .withMedications,
                 serialize: Serializers.medicationDoseEvent, enrich: { try await $0.enrichDoseEvent($1, $2) }
             ))
         }
@@ -342,10 +345,19 @@ enum TypeRegistry {
     static var skipped: [(identifier: String, reason: String)] {
         var out: [(String, String)] = []
         for entry in HealthKitCatalog.quantities where byKey[entry.key] == nil {
-            out.append((entry.identifier, isAvailable(entry.minimumOS) ? "unit \(entry.unit) unusable" : "needs a newer iOS"))
+            let reason: String
+            if !isAvailable(entry.minimumOS) {
+                reason = "needs a newer iOS"
+            } else if HKObjectType.quantityType(forIdentifier: HKQuantityTypeIdentifier(rawValue: entry.identifier)) == nil {
+                reason = "declared in the SDK but not provided by HealthKit on this iOS"
+            } else {
+                reason = "unit \(entry.unit) unusable"
+            }
+            out.append((entry.identifier, reason))
         }
         for entry in HealthKitCatalog.categories where byKey[entry.key] == nil {
-            out.append((entry.identifier, "needs a newer iOS"))
+            out.append((entry.identifier, isAvailable(entry.minimumOS)
+                ? "declared in the SDK but not provided by HealthKit on this iOS" : "needs a newer iOS"))
         }
         for entry in HealthKitCatalog.otherIdentifiers where byKey[entry.key] == nil {
             switch entry.kind {

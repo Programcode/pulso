@@ -12,10 +12,11 @@ final class HealthKitCatalogTests: XCTestCase {
     /// and every quantity must get a unit HKUnit parses and the type accepts.
     func testEveryCatalogTypeResolvesWithAUsableUnit() {
         var problems: [String] = []
+        var unprovided: [String] = []
         let info = ProcessInfo.processInfo
         for entry in HealthKitCatalog.quantities where info.isOperatingSystemAtLeast(entry.minimumOS) {
             guard let type = HKObjectType.quantityType(forIdentifier: HKQuantityTypeIdentifier(rawValue: entry.identifier)) else {
-                problems.append("unresolved \(entry.identifier)")
+                unprovided.append(entry.identifier)
                 continue
             }
             if TypeRegistry.presentation(for: type) == nil {
@@ -24,7 +25,7 @@ final class HealthKitCatalogTests: XCTestCase {
         }
         for entry in HealthKitCatalog.categories where info.isOperatingSystemAtLeast(entry.minimumOS) {
             if HKObjectType.categoryType(forIdentifier: HKCategoryTypeIdentifier(rawValue: entry.identifier)) == nil {
-                problems.append("unresolved \(entry.identifier)")
+                unprovided.append(entry.identifier)
             }
             if let valueEnum = entry.valueEnum, HealthKitCatalog.enumNames[valueEnum] == nil {
                 problems.append("no value names for \(entry.identifier) (\(valueEnum))")
@@ -36,6 +37,14 @@ final class HealthKitCatalogTests: XCTestCase {
             }
         }
         XCTAssertEqual(problems, [])
+        // Some identifiers stay in the headers after HealthKit stops
+        // providing them; those must be reported as skipped, not crash.
+        print("PULSO-UNPROVIDED \(unprovided)")
+        XCTAssertLessThan(unprovided.count, 5)
+        let skipped = Set(TypeRegistry.skipped.map(\.identifier))
+        for identifier in unprovided {
+            XCTAssertTrue(skipped.contains(identifier), identifier)
+        }
         XCTAssertGreaterThan(TypeRegistry.all.count, 180)
     }
 
@@ -49,6 +58,8 @@ final class HealthKitCatalogTests: XCTestCase {
             print("PULSO-REFUSED \(identifier): \(reason)")
         }
         XCTAssertGreaterThan(readSet.accepted.count, 150)
+        // Accepted only together with HRV; must survive the probe.
+        XCTAssertTrue(readSet.accepted.contains(HKSeriesType.heartbeat()))
         XCTAssertNoThrow(try ObjC.catching {
             store.getRequestStatusForAuthorization(toShare: [], read: readSet.accepted) { _, _ in }
         })

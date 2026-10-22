@@ -274,8 +274,10 @@ final class SerializerTests: XCTestCase {
             guard let label, let quantityType = type.sampleType as? HKQuantityType,
                   let presentation = TypeRegistry.presentation(for: quantityType) else { continue }
             XCTAssertEqual(presentation.label, label, key)
+            // Some types (audio exposure) require a non-zero duration.
             let sample = HKQuantitySample(
-                type: quantityType, quantity: HKQuantity(unit: presentation.unit, doubleValue: 1), start: start, end: start)
+                type: quantityType, quantity: HKQuantity(unit: presentation.unit, doubleValue: 1),
+                start: start, end: start.addingTimeInterval(60))
             XCTAssertEqual(type.serialize(sample, context)?.unit, label, key)
         }
         let keys = TypeRegistry.all.map(\.key) + TypeRegistry.snapshots.map(\.key)

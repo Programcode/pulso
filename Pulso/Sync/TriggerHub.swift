@@ -73,9 +73,10 @@ final class TriggerHub {
                 try? await healthStore.disableBackgroundDelivery(for: type.sampleType)
                 continue
             }
-            // Correlations change only through their member types, which
-            // have observers of their own; full passes pick them up.
-            guard type.access != .viaComponents else { continue }
+            // Only types in the main read set share the observer: one the app
+            // can't observe (a correlation, a type shared object by object)
+            // would fail the whole query. Full passes pick those up.
+            guard type.access == .read else { continue }
             do {
                 try await healthStore.enableBackgroundDelivery(for: type.sampleType, frequency: type.frequency)
             } catch {

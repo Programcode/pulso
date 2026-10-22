@@ -34,7 +34,17 @@ enum HealthAuthorization {
             return accepted(Array(types[..<middle])) + accepted(Array(types[middle...]))
         }
         let ordered = candidates.sorted { $0.identifier < $1.identifier }
-        let result = ReadSet(accepted: Set(accepted(ordered)), rejected: rejected)
+        var kept = accepted(ordered)
+        // Some types are only accepted alongside another (heartbeat series
+        // needs HRV in the same request), so an isolated refusal gets one
+        // more try next to everything that passed.
+        for identifier in rejected.keys.sorted() {
+            guard let type = ordered.first(where: { $0.identifier == identifier }),
+                  probe(kept + [type], store: store) == nil else { continue }
+            kept.append(type)
+            rejected[identifier] = nil
+        }
+        let result = ReadSet(accepted: Set(kept), rejected: rejected)
         UserDefaults.standard.set(result.rejected.keys.sorted(), forKey: rejectedKey)
         return result
     }
