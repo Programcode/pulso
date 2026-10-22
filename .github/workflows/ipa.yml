@@ -56,7 +56,7 @@ jobs:
 
       - name: Build for device without signing
         run: |
-          xcodebuild build \
+          if ! xcodebuild build \
             -project Pulso.xcodeproj \
             -scheme Pulso \
             -configuration Release \
@@ -68,8 +68,12 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            | tee build.log | grep -E '^(\*\*|error|warning: .*HealthKit)' || true
-          test "${PIPESTATUS[0]}" -eq 0 || { tail -100 build.log; exit 1; }
+            > build.log 2>&1; then
+            grep -E 'error:' build.log | head -50
+            tail -100 build.log
+            exit 1
+          fi
+          grep -E '^\*\*' build.log
 
       # Without an embedded signature the app carries no entitlements, and
       # some re-signers only keep what the binary declares. An ad-hoc
