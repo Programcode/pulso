@@ -406,11 +406,17 @@ Other type keys: `workout`, `workoutRoute`, `heartbeatSeries`,
 
 Characteristics, daily activity summaries and the medication list have no
 sync cursor, so they are re-read and sent only when their content changes.
-Each version is a new record: its `uuid` is the record key plus a content
-fingerprint (`activitySummary-2026-10-21-3f9a0c1b22de`), `details.recordKey`
-holds the stable key, and the same batch tombstones the version it
-replaces. A receiver that keeps the first copy of a uuid and one that
-upserts both end up with exactly the latest version.
+Each version is a new record whose `uuid` is never reused: the record key,
+a random epoch, and a version counter (`activitySummary-2026-10-21-3f9a0c1b-v2`).
+`details.recordKey` holds the stable key, and the same batch tombstones the
+version it replaces. Characteristics and medications that disappear from
+Health are tombstoned too. A receiver that keeps the first copy of a uuid
+and one that upserts both end up with exactly the latest version.
+
+After "Re-import Full History" the app starts a new epoch and does not
+tombstone the versions sent before it, so consumers should treat the newest
+record per `recordKey` as current (the self-hosted health-ingest receiver
+does this on insert).
 
 - `characteristics` (key `characteristics`): `details` holds
   `dateOfBirth`, `biologicalSex`, `bloodType`, `fitzpatrickSkinType`,
