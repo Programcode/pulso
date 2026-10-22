@@ -129,9 +129,11 @@ final class TriggerHub {
             await log.warn("background delivery unavailable for \(unavailable.count) type(s): \(unavailable.prefix(15).joined(separator: ", "))")
         }
         guard !descriptors.isEmpty else { return }
+        let log = log
         let query = HKObserverQuery(queryDescriptors: descriptors) { [weak self] _, changed, completionHandler, error in
-            if error != nil {
+            if let error {
                 completionHandler()
+                Task { await log.warn("observer query error: \(error.localizedDescription)") }
                 return
             }
             let keys = Set((changed ?? []).compactMap { TypeRegistry.type(for: $0)?.key })

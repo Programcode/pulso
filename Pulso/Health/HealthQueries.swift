@@ -92,17 +92,17 @@ struct HealthQueries: @unchecked Sendable {
         var dto = dto
         var details = dto.details ?? [:]
         let fromWorkout = HKQuery.predicateForObjects(from: workout)
-        let routes = try await samples(HKSeriesType.workoutRoute(), predicate: fromWorkout)
+        let routes = try await optionalLink { try await samples(HKSeriesType.workoutRoute(), predicate: fromWorkout) }
         if !routes.isEmpty {
             details["routeUUIDs"] = .array(routes.map { .string($0.uuid.uuidString) })
         }
         let heartRate = HKQuantityType(.heartRate)
-        var heartRateSamples = try await samples(heartRate, predicate: fromWorkout)
+        var heartRateSamples = try await optionalLink { try await samples(heartRate, predicate: fromWorkout) }
         var link = "associated"
         if heartRateSamples.isEmpty {
             let during = HKQuery.predicateForSamples(
                 withStart: workout.startDate, end: workout.endDate, options: .strictStartDate)
-            heartRateSamples = try await samples(heartRate, predicate: during)
+            heartRateSamples = try await optionalLink { try await samples(heartRate, predicate: during) }
             link = "timeRange"
         }
         if !heartRateSamples.isEmpty {
@@ -111,6 +111,18 @@ struct HealthQueries: @unchecked Sendable {
         }
         dto.details = details.isEmpty ? nil : details
         return dto
+    }
+
+    /// Links are extras: when the linked type isn't authorized the workout
+    /// still syncs without them. Any other failure (phone locked, ...)
+    /// throws, so the workout is read again with its links next time.
+    private func optionalLink(_ query: () async throws -> [HKSample]) async throws -> [HKSample] {
+        do {
+            return try await query()
+        } catch let error as HKError where error.code == .errorAuthorizationNotDetermined
+            || error.code == .errorAuthorizationDenied {
+            return []
+        }
     }
 
     static let locationFields: JSONValue = [
@@ -188,7 +200,7 @@ struct HealthQueries: @unchecked Sendable {
         var dto = dto
         // Names need per-object medication access; without it the concept
         // key alone still identifies the medication.
-        let medications = (try? await userAnnotatedMedications()) ?? []
+        let medications = await MedicationListCache.shared.list { try await userAnnotatedMedications() }
         if let match = medications.first(where: { $0.medication.identifier == event.medicationConceptIdentifier }) {
             var details = dto.details ?? [:]
             details["medicationName"] = .string(match.medication.displayText)
@@ -215,6 +227,21 @@ struct HealthQueries: @unchecked Sendable {
         guard value.isFinite else { return .null }
         let scale = pow(10, Double(digits))
         return .number((value * scale).rounded() / scale)
+    }
+}
+
+/// The medication list, read at most once a minute: a backfill enriches
+/// thousands of dose events and each would otherwise query it again.
+@available(iOS 26.0, *)
+actor MedicationListCache {
+    static let shared = MedicationListCache()
+    private var cached: (at: Date, list: [HKUserAnnotatedMedication])?
+
+    func list(_ load: () async throws -> [HKUserAnnotatedMedication]) async -> [HKUserAnnotatedMedication] {
+        if let cached, Date().timeIntervalSince(cached.at) < 60 { return cached.list }
+        let list = (try? await load()) ?? []
+        cached = (Date(), list)
+        return list
     }
 }
 
