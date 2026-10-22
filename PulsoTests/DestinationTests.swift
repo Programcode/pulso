@@ -130,4 +130,25 @@ final class DestinationTests: XCTestCase {
         XCTAssertEqual(rest.ingestURL?.absoluteString, "https://health.example.net:8797/ingest/pulso")
         XCTAssertNil(rest.latestURL, "catch-up is opt-in for REST")
     }
+
+    /// The anchor is shared, so the catch-up point must suit every
+    /// destination: earliest timestamp per type, and only types all have.
+    func testCatchUpUsesTheEarliestAnswerAndOnlySharedTypes() {
+        let merged = CatchUp.earliest([
+            ["heartRate": "2026-07-15T08:59:12+01:00", "stepCount": "2026-07-15T09:00:00+01:00"],
+            ["heartRate": "2026-07-10T08:00:00+02:00"],
+        ])
+        XCTAssertEqual(merged, ["heartRate": "2026-07-10T08:00:00+02:00"])
+        XCTAssertEqual(CatchUp.earliest([]), [:])
+    }
+
+    func testResendRangeMatchesOverlappingRecordsOnly() {
+        let day = SampleDTO(uuid: "d", type: "activitySummary", start: "2026-10-21T00:00:00+02:00",
+                            end: "2026-10-22T00:00:00+02:00", source: "x")
+        let iso = ISO8601DateFormatter()
+        XCTAssertTrue(SyncEngine.overlaps(day, start: iso.date(from: "2026-10-21T12:00:00Z"), end: nil))
+        XCTAssertFalse(SyncEngine.overlaps(day, start: iso.date(from: "2026-10-23T00:00:00Z"), end: nil))
+        XCTAssertFalse(SyncEngine.overlaps(day, start: nil, end: iso.date(from: "2026-10-20T00:00:00Z")))
+        XCTAssertTrue(SyncEngine.overlaps(day, start: nil, end: nil))
+    }
 }

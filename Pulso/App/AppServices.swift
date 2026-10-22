@@ -40,10 +40,18 @@ final class AppServices {
         engine = SyncEngine(
             healthStore: healthStore, anchors: anchors, outbox: outbox, log: log, status: status,
             latestHints: {
-                // The first destination that offers a catch-up hint answers.
-                guard let destination = AppSettings.activeDestinations().first(where: { $0.latestURL != nil }),
-                      let url = destination.latestURL else { return nil }
-                return await uploader.fetchLatest(url: url, token: destination.bearerToken)
+                // The anchor is shared, so skipping history is only safe when
+                // every destination already has it: all must answer, and the
+                // earliest answer per type wins.
+                let destinations = AppSettings.activeDestinations()
+                guard !destinations.isEmpty, destinations.allSatisfy({ $0.latestURL != nil }) else { return nil }
+                var answers: [[String: String]] = []
+                for destination in destinations {
+                    guard let url = destination.latestURL,
+                          let hints = await uploader.fetchLatest(url: url, token: destination.bearerToken) else { return nil }
+                    answers.append(hints)
+                }
+                return CatchUp.earliest(answers)
             }
         )
         hub = TriggerHub(healthStore: healthStore, engine: engine, log: log)
@@ -75,16 +83,21 @@ final class AppServices {
     private static func adoptLegacyOutbox(from legacy: URL, into queues: URL) {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: legacy, includingPropertiesForKeys: nil) else { return }
-        if let destination = AppSettings.currentDestinations().first(where: { $0.kind == .pulso }) {
+        // Without a migrated server there is nowhere to deliver them yet:
+        // leave the folder alone rather than lose queued data.
+        guard let destination = AppSettings.currentDestinations().first(where: { $0.kind == .pulso }) else { return }
+        do {
             let target = queues.appendingPathComponent(destination.id.uuidString, isDirectory: true)
-            try? fm.createDirectory(at: target, withIntermediateDirectories: true)
+            try fm.createDirectory(at: target, withIntermediateDirectories: true)
             for file in files where file.pathExtension == "json" {
-                try? fm.moveItem(at: file, to: target.appendingPathComponent(file.lastPathComponent))
+                try fm.moveItem(at: file, to: target.appendingPathComponent(file.lastPathComponent))
             }
             UserDefaults.standard.set(
                 UserDefaults.standard.integer(forKey: SettingsKeys.outboxSequence),
                 forKey: "\(SettingsKeys.outboxSequence).\(destination.id.uuidString)"
             )
+        } catch {
+            return // whatever didn't move stays put; the next launch tries again
         }
         try? fm.removeItem(at: legacy)
     }
@@ -277,9 +290,24 @@ final class AppServices {
 
     /// Keeps the process alive while a shortcut's work runs in the background.
     private func withBackgroundTime(_ name: String, _ work: () async -> Void) async {
-        let task = UIApplication.shared.beginBackgroundTask(withName: name)
+        // Ended either when the work finishes or when iOS says time is up,
+        // whichever comes first; an outstanding assertion gets the app killed.
+        final class Assertion: @unchecked Sendable {
+            private let lock = NSLock()
+            private var id: UIBackgroundTaskIdentifier = .invalid
+            func set(_ value: UIBackgroundTaskIdentifier) { lock.lock(); id = value; lock.unlock() }
+            func end() {
+                lock.lock()
+                let current = id
+                id = .invalid
+                lock.unlock()
+                if current != .invalid { UIApplication.shared.endBackgroundTask(current) }
+            }
+        }
+        let assertion = Assertion()
+        assertion.set(UIApplication.shared.beginBackgroundTask(withName: name) { assertion.end() })
         await work()
-        if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+        assertion.end()
     }
 
     // MARK: - Destinations

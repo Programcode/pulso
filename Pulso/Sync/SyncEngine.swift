@@ -35,6 +35,32 @@ enum CatchUp {
     /// future-dated server timestamp would otherwise produce an empty
     /// bounded query that persists a store-wide anchor and permanently
     /// skips the type's history.
+    /// Combines several servers' /latest answers: a type counts only if
+    /// every server has it, at the earliest of their timestamps.
+    static func earliest(_ answers: [[String: String]]) -> [String: String] {
+        guard var merged = answers.first else { return [:] }
+        for answer in answers.dropFirst() {
+            for (type, value) in merged {
+                guard let other = answer[type] else {
+                    merged[type] = nil
+                    continue
+                }
+                if let a = parse(value), let b = parse(other), b < a {
+                    merged[type] = other
+                }
+            }
+        }
+        return merged
+    }
+
+    private static func parse(_ raw: String) -> Date? {
+        let strict = ISO8601DateFormatter()
+        strict.formatOptions = [.withInternetDateTime]
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return strict.date(from: raw) ?? fractional.date(from: raw)
+    }
+
     static func cutoffs(fromLatest latest: [String: String], now: Date = Date()) -> [String: Date] {
         let strict = ISO8601DateFormatter()
         strict.formatOptions = [.withInternetDateTime]
@@ -263,7 +289,8 @@ actor SyncEngine {
                     ?? anchors.loadRaw(source.key).flatMap { try? JSONDecoder().decode(SnapshotState.self, from: $0) }
                 guard let state else { continue }
                 let records = try await source.read(queries, .live, nil).compactMap { record -> SampleDTO? in
-                    guard let entry = state.entries[record.uuid],
+                    guard Self.overlaps(record, start: start, end: end),
+                          let entry = state.entries[record.uuid],
                           entry.fingerprint == SnapshotState.fingerprint(record) else { return nil }
                     return state.versioned(record, version: entry.version)
                 }
@@ -286,6 +313,17 @@ actor SyncEngine {
         await status.setSyncing(false)
         await log.info(summary)
         return summary
+    }
+
+    /// Whether a record's interval touches [start, end]; open ends match all.
+    static func overlaps(_ record: SampleDTO, start: Date?, end: Date?) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        guard let recordStart = formatter.date(from: record.start), let recordEnd = formatter.date(from: record.end) else {
+            return true
+        }
+        if let start, recordEnd < start { return false }
+        if let end, recordStart > end { return false }
+        return true
     }
 
     private func cachedLatestHints() async -> [String: String]? {

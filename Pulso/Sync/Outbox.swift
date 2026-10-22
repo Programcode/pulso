@@ -122,13 +122,16 @@ actor Outbox {
         defer { Task { await self.refreshPendingStatus() } }
         var files = pendingFiles()
         guard !files.isEmpty else { return }
-        guard let transport = transport() else {
+        guard transport() != nil else {
             await log.info("\(label): \(files.count) batch(es) waiting — destination not configured")
             return
         }
         if !force && Date() < nextAttempt { return }
 
         while let file = files.first, !Task.isCancelled {
+            // Resolved per batch so disabling or editing the destination
+            // takes effect mid-drain.
+            guard let transport = transport() else { return }
             files.removeFirst()
             let batch: Batch
             do {

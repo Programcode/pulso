@@ -175,7 +175,9 @@ struct MQTTTransport: Transport {
             useTLS: destination.mqttTLS,
             username: destination.mqttUsername.isEmpty ? nil : destination.mqttUsername,
             password: destination.mqttPassword,
-            clientID: "pulso-" + String(DeviceInfo.current.id.prefix(8))
+            // One per destination: a broker drops the older of two
+            // connections that share a client id.
+            clientID: "pulso-\(DeviceInfo.current.id.prefix(8))-\(destination.id.uuidString.prefix(8))"
         )
     }
 
@@ -266,7 +268,13 @@ struct FileTransport: Transport {
         if let error = coordinationError ?? bodyError { throw error }
     }
 
+    /// File destinations drain concurrently and may share a folder; one
+    /// lock keeps two appends from landing at the same offset.
+    private static let appendLock = NSLock()
+
     private static func append(_ data: Data, to file: URL) throws {
+        appendLock.lock()
+        defer { appendLock.unlock() }
         if !FileManager.default.fileExists(atPath: file.path) {
             try data.write(to: file, options: .atomic)
             return
