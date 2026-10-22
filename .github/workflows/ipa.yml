@@ -1,0 +1,126 @@
+name: Unsigned IPA
+
+# Builds an unsigned Pulso.ipa for re-signing (Signulous, AltStore, …).
+# Every run uploads it as an artifact; a pushed v* tag also attaches it to a
+# GitHub Release.
+#
+# Bundle id: the workflow_dispatch input wins, then the PULSO_BUNDLE_ID repo
+# variable, then com.programcode.pulso.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: Bundle identifier to build with
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    name: Build unsigned IPA
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      BUNDLE_ID: ${{ inputs.bundle_id || vars.PULSO_BUNDLE_ID || 'com.programcode.pulso' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the newest stable Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          XCODE=$(ls -d /Applications/Xcode_*.app | grep -viE 'beta|_rc|release_candidate' | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Work out the version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            MARKETING="${GITHUB_REF#refs/tags/v}"
+          else
+            MARKETING=$(sed -n 's/.*MARKETING_VERSION = \(.*\);/\1/p' Pulso.xcodeproj/project.pbxproj | head -1)
+          fi
+          echo "MARKETING=$MARKETING" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "Version $MARKETING ($GITHUB_RUN_NUMBER), bundle id $BUNDLE_ID"
+
+      - name: Build for device without signing
+        run: |
+          xcodebuild build \
+            -project Pulso.xcodeproj \
+            -scheme Pulso \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            MARKETING_VERSION="$MARKETING" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            | tee build.log | grep -E '^(\*\*|error|warning: .*HealthKit)' || true
+          test "${PIPESTATUS[0]}" -eq 0 || { tail -100 build.log; exit 1; }
+
+      # Without an embedded signature the app carries no entitlements, and
+      # some re-signers only keep what the binary declares. An ad-hoc
+      # signature embeds them without needing any certificate.
+      - name: Embed entitlements with an ad-hoc signature
+        run: |
+          APP=build/Build/Products/Release-iphoneos/Pulso.app
+          codesign --force --sign - --timestamp=none \
+            --entitlements Pulso/Pulso.entitlements "$APP"
+          codesign -d --entitlements - --xml "$APP" > entitlements.xml
+          cat entitlements.xml; echo
+          grep -q com.apple.developer.healthkit entitlements.xml
+          grep -q com.apple.developer.healthkit.background-delivery entitlements.xml
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :BGTaskSchedulerPermittedIdentifiers' "$APP/Info.plist"
+
+      - name: Package Payload/ as an IPA
+        run: |
+          rm -rf Payload dist && mkdir -p Payload dist
+          cp -R build/Build/Products/Release-iphoneos/Pulso.app Payload/
+          NAME="Pulso-$MARKETING-$BUILD_NUMBER-unsigned.ipa"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload "dist/$NAME"
+          cp Pulso/Pulso.entitlements dist/Pulso.entitlements
+          unzip -l "dist/$NAME" | tail -3
+          echo "IPA_NAME=$NAME" >> "$GITHUB_ENV"
+
+      - name: Dump the SDK's HealthKit headers
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p sdk-headers
+          cp -R "$SDK/System/Library/Frameworks/HealthKit.framework/Headers" sdk-headers/HealthKit
+          xcrun --sdk iphoneos --show-sdk-version > sdk-headers/SDK_VERSION
+          xcodebuild -version > sdk-headers/XCODE_VERSION
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pulso-unsigned-ipa
+          path: dist/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: healthkit-sdk-headers
+          path: sdk-headers/
+
+      - name: Attach to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "Pulso $TAG" --notes "Unsigned build for re-signing. Bundle id: $BUNDLE_ID."
+          gh release upload "$TAG" "dist/$IPA_NAME" dist/Pulso.entitlements --clobber
