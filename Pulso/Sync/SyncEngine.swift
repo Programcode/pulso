@@ -383,6 +383,9 @@ actor SyncEngine {
         if !superseded.isEmpty {
             elements.append(.tombstone(superseded))
         }
+        // Reserve the new versions durably first: the batch and the state
+        // are two writes, and a crash between them must not reuse a uuid.
+        anchors.saveRaw(try JSONEncoder().encode(state.reservation(committed: known)), for: source.key)
         try await outbox.enqueue(typeKey: source.key, elements: elements)
         anchors.saveRaw(encoded, for: source.key)
         snapshotCache[source.key] = state
