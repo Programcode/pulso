@@ -21,6 +21,22 @@ import re
 import sys
 
 ID_LINE = re.compile(r"HK_EXTERN\s+(\w+)\s+const\s+(\w+)\s+(.*?);\s*(?://\s*(.*))?$")
+def enum_value(expr, known, implicit):
+    """Value of an enum initializer: decimal or hex literals, shifts and ors
+    of those, and earlier cases of the same enum. None when it is anything
+    else, so one odd header line can't stop the build."""
+    expr = expr.strip()
+    for case_name, case_value in sorted(known.items(), key=lambda kv: -len(kv[0])):
+        expr = re.sub(r"\b%s\b" % re.escape(case_name), str(case_value), expr)
+    expr = re.sub(r"(?<=[0-9A-Fa-f])[uUlL]+\b", "", expr)
+    if not re.fullmatch(r"[0-9xXa-fA-F\s()<>|+-]+", expr):
+        return None
+    try:
+        return int(eval(expr, {"__builtins__": {}}, {}))
+    except Exception:
+        return None
+
+
 ENUM_START = re.compile(r"typedef\s+NS_ENUM\s*\(\s*\w+\s*,\s*(\w+)\s*\)\s*\{")
 ENUM_CASE = re.compile(r"^\s*(\w+)\s*(.*?)\s*(?:=\s*([\w-]+))?\s*,?\s*(?://.*)?$")
 
@@ -92,16 +108,14 @@ def parse_enums(path, wanted=None):
             raw = re.sub(r"//.*$", "", raw).strip()
             if not raw or raw.startswith(("//", "/*", "*")):
                 continue
-            cm = re.match(r"^(\w+)(.*?)(?:=\s*([\w-]+))?\s*,?\s*$", raw)
+            cm = re.match(r"^(\w+)([^=]*?)(?:=\s*(.+?))?\s*,?\s*$", raw)
             if not cm:
                 continue
             case, attrs, value = cm.groups()
-            if value is None:
-                v = nxt
-            elif re.match(r"^-?\d+$", value):
-                v = int(value)
-            else:
-                v = values[value]
+            v = enum_value(value, values, nxt) if value is not None else nxt
+            if v is None:
+                print("warning: %s.%s = %s not understood; skipped" % (name, case, value), file=sys.stderr)
+                continue
             values[case] = v
             nxt = v + 1
             short = case[len(name):] if case.startswith(name) else case
