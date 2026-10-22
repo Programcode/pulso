@@ -405,20 +405,22 @@ Other type keys: `workout`, `workoutRoute`, `heartbeatSeries`,
 ## Snapshots
 
 Characteristics, daily activity summaries and the medication list have no
-sync cursor, so they are sent as records with stable ids, and only when
-their content changes:
+sync cursor, so they are re-read and sent only when their content changes.
+Each version is a new record: its `uuid` is the record key plus a content
+fingerprint (`activitySummary-2026-10-21-3f9a0c1b22de`), `details.recordKey`
+holds the stable key, and the same batch tombstones the version it
+replaces. A receiver that keeps the first copy of a uuid and one that
+upserts both end up with exactly the latest version.
 
-- `characteristics` (uuid `characteristics`): `details` holds
+- `characteristics` (key `characteristics`): `details` holds
   `dateOfBirth`, `biologicalSex`, `bloodType`, `fitzpatrickSkinType`,
   `wheelchairUse`, `activityMoveMode`.
-- `activitySummary` (uuid `activitySummary-YYYY-MM-DD`, start/end = that
+- `activitySummary` (key `activitySummary-YYYY-MM-DD`, start/end = that
   day): move, exercise and stand values with their goals, `activityMoveMode`,
   `paused`. The first read covers all history; later reads re-check the
-  last 35 days.
-- `medication` (uuid `medication-<concept key>`): `displayText`, `nickname`,
+  last 35 days, or from the last day sent if that is earlier.
+- `medication` (key `medication-<concept key>`): `displayText`, `nickname`,
   `generalForm`, `isArchived`, `hasSchedule`, `relatedCodings`.
-
-Receivers should upsert by uuid.
 
 ## Deletions
 

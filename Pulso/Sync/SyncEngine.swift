@@ -259,7 +259,7 @@ actor SyncEngine {
         }
         for source in AppSettings.currentEnabledSnapshots() where keys?.contains(source.key) ?? true {
             do {
-                let records = try await source.read(queries, .live, true)
+                let records = try await source.read(queries, .live, nil).map(Self.versioned)
                 if !records.isEmpty {
                     try await outbox.enqueue(typeKey: source.key, elements: records.map(BatchElement.sample))
                     queued += records.count
@@ -381,12 +381,7 @@ actor SyncEngine {
                 superseded.append(Self.versionedUUID(key, previous))
             }
             state[key] = fingerprint
-            var versioned = record
-            versioned.uuid = Self.versionedUUID(key, fingerprint)
-            var details = versioned.details ?? [:]
-            details["recordKey"] = .string(key)
-            versioned.details = details
-            changed.append(versioned)
+            changed.append(Self.versioned(record))
         }
         await status.recordChecked(source.key)
         let encoded = try JSONEncoder().encode(state)
@@ -407,6 +402,17 @@ actor SyncEngine {
 
     static func versionedUUID(_ key: String, _ fingerprint: String) -> String {
         "\(key)-\(fingerprint.prefix(12))"
+    }
+
+    /// The record as sent: uuid versioned by content, stable key kept in
+    /// details.recordKey.
+    static func versioned(_ record: SampleDTO) -> SampleDTO {
+        var out = record
+        out.uuid = versionedUUID(record.uuid, fingerprint(record))
+        var details = out.details ?? [:]
+        details["recordKey"] = .string(record.uuid)
+        out.details = details
+        return out
     }
 
     /// Content identity of a snapshot record; timestamps are left out
