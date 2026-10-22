@@ -28,8 +28,10 @@ struct DestinationsSection: View {
                 }
             }
             .onDelete { offsets in
-                for index in offsets {
-                    services.removeDestination(services.settings.destinations[index])
+                // Resolve first: each removal shifts the indices after it.
+                let doomed = offsets.map { services.settings.destinations[$0] }
+                for destination in doomed {
+                    services.removeDestination(destination)
                 }
             }
             Menu("Add Destination") {
@@ -42,7 +44,7 @@ struct DestinationsSection: View {
         } header: {
             Text("Destinations")
         } footer: {
-            Text("Every enabled destination gets every batch, from its own queue: one being down never holds up the others.")
+            Text("Every enabled destination gets every batch, from its own queue: one being down never holds up the others. A destination that is off, or added later, doesn't get what was synced before; run the Backfill shortcut to send it history.")
         }
     }
 }
@@ -114,10 +116,15 @@ struct DestinationEditor: View {
         }
         .onChange(of: destination) { _, _ in services.destinationsChanged() }
         .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
-            guard case .success(let url) = result, url.startAccessingSecurityScopedResource() else { return }
-            defer { url.stopAccessingSecurityScopedResource() }
-            destination.folderBookmark = try? url.bookmarkData()
-            destination.folderName = url.lastPathComponent
+            guard case .success(let url) = result else { return }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                destination.folderBookmark = try url.bookmarkData()
+                destination.folderName = url.lastPathComponent
+            } catch {
+                testResult = "Couldn't keep access to that folder: \(error.localizedDescription)"
+            }
         }
     }
 

@@ -86,16 +86,20 @@ final class AppServices {
         // Without a migrated server there is nowhere to deliver them yet:
         // leave the folder alone rather than lose queued data.
         guard let destination = AppSettings.currentDestinations().first(where: { $0.kind == .pulso }) else { return }
+        // Never move a queue's sequence backwards, or new batches would sort
+        // ahead of ones already waiting.
+        let defaults = UserDefaults.standard
+        let sequenceKey = "\(SettingsKeys.outboxSequence).\(destination.id.uuidString)"
+        defaults.set(
+            max(defaults.integer(forKey: SettingsKeys.outboxSequence), defaults.integer(forKey: sequenceKey)),
+            forKey: sequenceKey
+        )
         do {
             let target = queues.appendingPathComponent(destination.id.uuidString, isDirectory: true)
             try fm.createDirectory(at: target, withIntermediateDirectories: true)
             for file in files where file.pathExtension == "json" {
                 try fm.moveItem(at: file, to: target.appendingPathComponent(file.lastPathComponent))
             }
-            UserDefaults.standard.set(
-                UserDefaults.standard.integer(forKey: SettingsKeys.outboxSequence),
-                forKey: "\(SettingsKeys.outboxSequence).\(destination.id.uuidString)"
-            )
         } catch {
             return // whatever didn't move stays put; the next launch tries again
         }

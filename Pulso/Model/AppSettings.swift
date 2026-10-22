@@ -52,15 +52,32 @@ final class AppSettings {
         storeDestinations(migrated)
     }
 
+    /// Header values go to the Keychain; the list is saved with them blank.
     nonisolated static func storeDestinations(_ destinations: [Destination]) {
-        if let data = try? JSONEncoder().encode(destinations) {
+        var stripped = destinations
+        for index in stripped.indices {
+            for headerIndex in stripped[index].headers.indices {
+                let header = stripped[index].headers[headerIndex]
+                Keychain.set(header.value, for: stripped[index].headerValueAccount(header))
+                stripped[index].headers[headerIndex].value = ""
+            }
+        }
+        if let data = try? JSONEncoder().encode(stripped) {
             UserDefaults.standard.set(data, forKey: SettingsKeys.destinations)
         }
     }
 
     nonisolated static func currentDestinations() -> [Destination] {
-        guard let data = UserDefaults.standard.data(forKey: SettingsKeys.destinations) else { return [] }
-        return (try? JSONDecoder().decode([Destination].self, from: data)) ?? []
+        guard let data = UserDefaults.standard.data(forKey: SettingsKeys.destinations),
+              var destinations = try? JSONDecoder().decode([Destination].self, from: data) else { return [] }
+        for index in destinations.indices {
+            for headerIndex in destinations[index].headers.indices {
+                let header = destinations[index].headers[headerIndex]
+                destinations[index].headers[headerIndex].value =
+                    Keychain.string(for: destinations[index].headerValueAccount(header)) ?? ""
+            }
+        }
+        return destinations
     }
 
     nonisolated static func activeDestinations() -> [Destination] {

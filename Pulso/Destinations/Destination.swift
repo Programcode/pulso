@@ -37,10 +37,24 @@ struct Destination: Codable, Identifiable, Equatable, Sendable {
         case ndjson
     }
 
+    /// Header values can be API keys, so they are kept in the Keychain:
+    /// AppSettings stores them there and saves the list with values blank.
     struct Header: Codable, Equatable, Hashable, Identifiable, Sendable {
         var id = UUID()
         var name: String
         var value: String
+
+        init(name: String, value: String) {
+            self.name = name
+            self.value = value
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+            name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+            value = try c.decodeIfPresent(String.self, forKey: .value) ?? ""
+        }
     }
 
     var id = UUID()
@@ -69,6 +83,29 @@ struct Destination: Codable, Identifiable, Equatable, Sendable {
     // nil means the app's own Documents/Pulso Export folder.
     var folderBookmark: Data?
     var folderName: String?
+
+    /// Every field falls back to its default when missing, so a field added
+    /// in a later version can't make an existing list fail to decode.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(Kind.self, forKey: .kind)
+        self.init(name: try c.decodeIfPresent(String.self, forKey: .name) ?? kind.title, kind: kind)
+        id = try c.decode(UUID.self, forKey: .id)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? enabled
+        url = try c.decodeIfPresent(String.self, forKey: .url) ?? url
+        format = try c.decodeIfPresent(BodyFormat.self, forKey: .format) ?? format
+        gzip = try c.decodeIfPresent(Bool.self, forKey: .gzip) ?? gzip
+        headers = try c.decodeIfPresent([Header].self, forKey: .headers) ?? headers
+        catchUp = try c.decodeIfPresent(Bool.self, forKey: .catchUp) ?? catchUp
+        mqttHost = try c.decodeIfPresent(String.self, forKey: .mqttHost) ?? mqttHost
+        mqttPort = try c.decodeIfPresent(Int.self, forKey: .mqttPort) ?? mqttPort
+        mqttTLS = try c.decodeIfPresent(Bool.self, forKey: .mqttTLS) ?? mqttTLS
+        mqttUsername = try c.decodeIfPresent(String.self, forKey: .mqttUsername) ?? mqttUsername
+        mqttTopicPrefix = try c.decodeIfPresent(String.self, forKey: .mqttTopicPrefix) ?? mqttTopicPrefix
+        mqttRetain = try c.decodeIfPresent(Bool.self, forKey: .mqttRetain) ?? mqttRetain
+        folderBookmark = try c.decodeIfPresent(Data.self, forKey: .folderBookmark)
+        folderName = try c.decodeIfPresent(String.self, forKey: .folderName)
+    }
 
     init(name: String, kind: Kind) {
         self.name = name
@@ -111,10 +148,15 @@ struct Destination: Codable, Identifiable, Equatable, Sendable {
         nonmutating set { Keychain.set(newValue, for: account("mqtt")) }
     }
 
+    func headerValueAccount(_ header: Header) -> String { account("header.\(header.id.uuidString)") }
+
     func deleteSecrets() {
         bearerToken = nil
         hmacSecret = nil
         mqttPassword = nil
+        for header in headers {
+            Keychain.set(nil, for: headerValueAccount(header))
+        }
     }
 
     // MARK: - URLs
@@ -138,17 +180,22 @@ struct Destination: Codable, Identifiable, Equatable, Sendable {
         case .pulso:
             return AppSettings.baseURL(from: url).flatMap { URL(string: $0.absoluteString + "/latest") }
         case .rest:
-            return Self.httpURL(url).flatMap { URL(string: $0.absoluteString + "/latest") }
+            return Self.httpURL(url).flatMap { url in
+                var base = url.absoluteString
+                while base.hasSuffix("/") { base.removeLast() }
+                return URL(string: base + "/latest")
+            }
         default:
             return nil
         }
     }
 
+    /// A full endpoint URL, used exactly as typed (a trailing slash can be
+    /// significant to the server).
     static func httpURL(_ raw: String) -> URL? {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
         if !s.contains("://") { s = "https://" + s }
-        while s.hasSuffix("/") { s.removeLast() }
         guard let url = URL(string: s), url.host() != nil else { return nil }
         return url
     }

@@ -34,7 +34,7 @@ actor OutboxHub {
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    private func outbox(for destination: Destination, primary: Bool) -> Outbox {
+    private func outbox(for destination: Destination) -> Outbox {
         if let existing = outboxes[destination.id] { return existing }
         let id = destination.id
         let destinations = destinations
@@ -51,30 +51,32 @@ actor OutboxHub {
             maxBatchBytes: maxBatchBytes,
             maxItems: destination.maxItemsPerBatch,
             destinationID: id,
-            countsTowardTypes: primary
+            // Per-type counts follow the first deliverable destination,
+            // decided per batch so removing it hands the role on.
+            countsTowardTypes: { destinations().first { $0.enabled && $0.isConfigured }?.id == id }
         )
         outboxes[id] = outbox
         return outbox
     }
 
+    /// Every enabled destination, configured or not: one whose URL is being
+    /// edited keeps queueing and delivers once it is valid again, instead of
+    /// missing the batches synced meanwhile.
     private var active: [(destination: Destination, outbox: Outbox)] {
-        let enabled = destinations().filter { $0.enabled && $0.isConfigured }
-        return enabled.enumerated().map { index, destination in
-            (destination, outbox(for: destination, primary: index == 0))
-        }
+        destinations().filter(\.enabled).map { ($0, outbox(for: $0)) }
     }
 
-    /// True when at least one destination would receive a batch.
+    /// True when at least one destination can deliver right now.
     func hasActiveDestination() -> Bool {
-        !active.isEmpty
+        destinations().contains { $0.enabled && $0.isConfigured }
     }
 
-    /// Writes the elements to every active destination's queue. Throws if
-    /// there is none or a write fails, in which case the caller must not
+    /// Writes the elements to every enabled destination's queue. Throws if
+    /// none can deliver or a write fails, in which case the caller must not
     /// advance its anchor.
     func enqueue(typeKey: String, elements: [BatchElement]) async throws {
         let targets = active
-        guard !targets.isEmpty else { throw EnqueueError.noDestination }
+        guard hasActiveDestination() else { throw EnqueueError.noDestination }
         for target in targets {
             try await target.outbox.enqueue(typeKey: typeKey, elements: elements, anchor: nil)
         }

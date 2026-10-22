@@ -155,4 +155,35 @@ final class DestinationTests: XCTestCase {
         XCTAssertFalse(SyncEngine.overlaps(day, start: nil, end: iso.date(from: "2026-10-20T00:00:00Z")))
         XCTAssertTrue(SyncEngine.overlaps(day, start: nil, end: nil))
     }
+
+    /// A destination whose URL is being edited still gets the batch queued,
+    /// so it delivers later instead of missing what synced meanwhile.
+    func testUnconfiguredButEnabledDestinationStillQueues() async throws {
+        let file = Destination(name: "file", kind: .file)
+        var editing = Destination(name: "rest", kind: .rest)
+        editing.url = ""
+        XCTAssertFalse(editing.isConfigured)
+        let failing = MockTransport()
+        failing.failing = true
+        let destinations = [file, editing]
+        let hub = OutboxHub(
+            root: base, log: LogStore(directory: base), status: AppStatus(),
+            destinations: { destinations },
+            transport: { $0.id == file.id ? MockTransport() : failing }
+        )
+        try await hub.enqueue(typeKey: "heartRate", elements: [sample("a")])
+        XCTAssertEqual(pendingFiles(editing.id).count, 1)
+    }
+
+    /// Fields added in later versions must not make a stored list unreadable.
+    func testDestinationDecodesWithMissingFields() throws {
+        let id = UUID()
+        let json = #"[{"id":"\#(id.uuidString)","kind":"rest","url":"https://x.example/in"}]"#
+        let decoded = try JSONDecoder().decode([Destination].self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.first?.id, id)
+        XCTAssertEqual(decoded.first?.url, "https://x.example/in")
+        XCTAssertEqual(decoded.first?.gzip, true)
+        XCTAssertEqual(decoded.first?.format, .envelope)
+        XCTAssertEqual(decoded.first?.enabled, true)
+    }
 }

@@ -34,7 +34,7 @@ struct HTTPUploader: Uploading {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         let started = Date()
-        let (data, response) = try await session.upload(for: request, from: body)
+        let (data, response) = try await session.upload(for: request, from: body, delegate: NoRedirects.shared)
         return UploadResult(
             status: (response as? HTTPURLResponse)?.statusCode ?? 0,
             bodySnippet: String(decoding: data.prefix(300), as: UTF8.self),

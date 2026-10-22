@@ -25,7 +25,7 @@ actor Outbox {
     private let destinationID: UUID?
     /// Per-type delivery counts come from one destination only, or two
     /// destinations would double them.
-    private let countsTowardTypes: Bool
+    private let countsTowardTypes: @Sendable () -> Bool
     private let sequenceKey: String
     private var sequence: Int
     private var failureCount = 0
@@ -42,7 +42,7 @@ actor Outbox {
         maxBatchBytes: Int = Wire.maxBatchBytes,
         maxItems: Int? = nil,
         destinationID: UUID? = nil,
-        countsTowardTypes: Bool = true
+        countsTowardTypes: @escaping @Sendable () -> Bool = { true }
     ) {
         self.directory = directory
         self.anchors = anchors
@@ -155,7 +155,7 @@ actor Outbox {
                 failureCount = 0
                 nextAttempt = .distantPast
                 let response = "\(result.status) · \(result.bodySnippet.prefix(80))"
-                if countsTowardTypes {
+                if countsTowardTypes() {
                     await status.recordDelivery(typeKey: batch.typeKey, count: batch.sampleCount, response: response)
                 }
                 if let destinationID {
@@ -184,7 +184,7 @@ actor Outbox {
         if let destinationID {
             await status.recordDestinationFailure(destinationID, response: text)
         }
-        if countsTowardTypes {
+        if countsTowardTypes() {
             await status.setLastResponse(text)
         }
         await log.warn("\(label): delivery failed: \(reason)\(hint) — retrying in \(Int(delay))s")

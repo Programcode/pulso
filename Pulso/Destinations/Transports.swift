@@ -146,7 +146,7 @@ struct HTTPTransport: Transport {
             request.setValue("sha256=" + Self.hmacHex(body, secret: secret), forHTTPHeaderField: "X-Signature")
         }
         let started = Date()
-        let (data, response) = try await session.upload(for: request, from: body)
+        let (data, response) = try await session.upload(for: request, from: body, delegate: NoRedirects.shared)
         return UploadResult(
             status: (response as? HTTPURLResponse)?.statusCode ?? 0,
             bodySnippet: String(decoding: data.prefix(300), as: UTF8.self),
@@ -157,6 +157,20 @@ struct HTTPTransport: Transport {
     static func hmacHex(_ body: Data, secret: String) -> String {
         let mac = HMAC<SHA256>.authenticationCode(for: body, using: SymmetricKey(data: Data(secret.utf8)))
         return mac.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Refuses redirects: URLSession would re-issue a redirected POST as a
+/// body-less GET, and a 2xx to that would count as delivered. The 3xx
+/// itself comes back instead, which the outbox treats as a failure.
+final class NoRedirects: NSObject, URLSessionTaskDelegate {
+    static let shared = NoRedirects()
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        nil
     }
 }
 
@@ -255,8 +269,8 @@ struct FileTransport: Transport {
         }
         var stale = false
         let folder = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale)
-        guard folder.startAccessingSecurityScopedResource() else {
-            throw CocoaError(.fileWriteNoPermission)
+        guard !stale, folder.startAccessingSecurityScopedResource() else {
+            throw FolderAccessError()
         }
         defer { folder.stopAccessingSecurityScopedResource() }
         // Coordinated, so iCloud Drive sees the write as one change.
@@ -271,6 +285,10 @@ struct FileTransport: Transport {
     /// File destinations drain concurrently and may share a folder; one
     /// lock keeps two appends from landing at the same offset.
     private static let appendLock = NSLock()
+
+    struct FolderAccessError: LocalizedError {
+        var errorDescription: String? { "Lost access to the export folder: choose it again in the destination's settings" }
+    }
 
     private static func append(_ data: Data, to file: URL) throws {
         appendLock.lock()
