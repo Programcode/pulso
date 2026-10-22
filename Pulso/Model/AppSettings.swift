@@ -35,6 +35,9 @@ final class AppSettings {
         Self.migrateLegacyEndpoint()
         enabled = Self.storedEnabled()
         destinations = Self.currentDestinations()
+        // Rewrites the stored list once per launch, so a header value saved
+        // in plain text by an earlier build moves to the Keychain.
+        Self.storeDestinations(destinations)
     }
 
     /// Before destinations, Pulso had one server URL and token. A non-empty
@@ -73,8 +76,10 @@ final class AppSettings {
         for index in destinations.indices {
             for headerIndex in destinations[index].headers.indices {
                 let header = destinations[index].headers[headerIndex]
+                // A value saved in the list by an earlier build is kept until
+                // the next save moves it to the Keychain.
                 destinations[index].headers[headerIndex].value =
-                    Keychain.string(for: destinations[index].headerValueAccount(header)) ?? ""
+                    Keychain.string(for: destinations[index].headerValueAccount(header)) ?? header.value
             }
         }
         return destinations
