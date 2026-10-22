@@ -6,7 +6,7 @@
 	<string>Pulso reads the health data you select and sends it only to the server you configure.</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>$(PRODUCT_BUNDLE_IDENTIFIER).refresh</string>
+		<string>pulso.refresh</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>

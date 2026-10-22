@@ -8,7 +8,9 @@ import UIKit
 /// foreground hook (wired via AppServices.scenePhase).
 @MainActor
 final class TriggerHub {
-    static let refreshTaskID = (Bundle.main.bundleIdentifier ?? "dev.lenilson.pulso") + ".refresh"
+    /// Fixed rather than derived from the bundle id: Info.plist lists it
+    /// verbatim, and a re-signed build may run under a different bundle id.
+    static let refreshTaskID = "pulso.refresh"
 
     private let healthStore: HKHealthStore
     private let engine: SyncEngine
