@@ -49,20 +49,25 @@ continuously, a dedicated app is the only honest path. This is that app.
 ## How it works
 
 ```
-HealthKit ──anchored queries──► SyncEngine ──batches──► Outbox (disk) ──HTTP──► your server
-                 ▲                                          │
-   observer / BGTask / foreground triggers            retry w/ backoff
+                                                  ┌─► queue (disk) ──HTTPS──► webhook / Pulso server / Home Assistant
+HealthKit ──anchored queries──► SyncEngine ──batches──┼─► queue (disk) ──MQTT───► broker
+                 ▲                                │                        │
+   observer / BGTasks / Shortcuts / app open      └─► queue (disk) ──file───► NDJSON folder
+                                                       each queue retries on its own, with backoff
 ```
 
 - **Anchored queries** (`HKAnchoredObjectQuery`) are the sync cursor: each
   pass returns exactly the new samples and deletions since the last anchor —
   rewrites and late backfills from other apps included.
-- **The outbox** writes every batch to disk *before* the first upload
-  attempt and deletes it only on a server 2xx. **The anchor advances only
-  when the server ACKs.** Crash anywhere and the worst case is a re-send,
-  which the server dedupes by sample uuid.
-- **Triggers**: HealthKit background delivery (immediate for sleep and
-  workouts, hourly for the rest), an opportunistic `BGAppRefreshTask`, and a
+- **The queues** (one per destination that receives batches) get every
+  batch on disk *before* the first delivery attempt, and each deletes it
+  only once its own destination accepts it (a 2xx, an MQTT PUBACK, a
+  completed file write). **The anchor advances once the batch is in every
+  queue**, so a destination that is down delays only itself. Crash anywhere
+  and the worst case is a re-send, which receivers dedupe by sample uuid.
+- **Triggers**: HealthKit background delivery (immediate for categories,
+  workouts and other events, hourly for quantity types), an opportunistic
+  `BGAppRefreshTask`, a `BGProcessingTask`, the Shortcuts actions, and a
   full sync every time you open the app.
 
 **Honest expectations:** iOS does not run daemons, and health data is

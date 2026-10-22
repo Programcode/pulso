@@ -51,7 +51,9 @@ struct HTTPUploader: Uploading {
         if let token, !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        guard let (data, response) = try? await session.data(for: request),
+        // The request carries the token: never let a redirect take it elsewhere.
+        // A 3xx is non-200, so the caller falls back to a full backfill.
+        guard let (data, response) = try? await session.data(for: request, delegate: NoRedirects.shared),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return try? JSONDecoder().decode([String: String].self, from: data)
     }
