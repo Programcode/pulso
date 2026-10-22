@@ -283,3 +283,154 @@ The reference server appends each element to `data/<type>.ndjson` (tombstones
 to `data/_deleted.ndjson`), one JSON object per line, adding a `receivedAt`
 field with the server's local time. Inspect with `cat`, `jq`, or anything
 that reads lines.
+
+---
+
+# v2 (this fork): every HealthKit type, several destinations
+
+v2 keeps v1's sample object and adds to it; everything above still holds
+for a "Pulso server" destination, which sends exactly the v1 body.
+
+## Request bodies
+
+Each destination picks one of three bodies for a batch:
+
+- **pulso.v2 envelope** (HTTPS / webhook default, and Home Assistant):
+
+  ```json
+  {
+    "schema": "pulso.v2",
+    "batchId": "6F1C…",
+    "type": "heartRate",
+    "createdAt": "2026-10-22T08:00:03Z",
+    "sentAt": "2026-10-22T08:00:04Z",
+    "device": {"id": "<identifierForVendor>", "name": "iPhone", "model": "iPhone",
+               "systemVersion": "26.1", "appVersion": "0.1.0 (12)", "bundleId": "com.programcode.pulso"},
+    "items": [ <sample objects and tombstones, as in v1> ]
+  }
+  ```
+
+  A test request (the Test button) is `{"schema": "pulso.v2", "test": true,
+  "items": [], …}`; receivers should accept it and store nothing.
+
+- **Bare array**: the v1 body.
+- **NDJSON**: one item per line (also what file export writes).
+
+`type` names the type the batch was read for; items carry their own `type`
+too. Batches hold one type, except snapshot batches.
+
+## Headers
+
+- `Content-Encoding: gzip` when the destination has gzip on (default for
+  HTTPS; off for Home Assistant).
+- `Authorization: Bearer <token>` when a token is set.
+- `X-Signature: sha256=<hex>` when an HMAC secret is set: HMAC-SHA256 of the
+  request body **exactly as sent** (after gzip), keyed with the secret.
+- `X-Pulso-Batch: <batchId>` and `X-Pulso-Type: <type>` on every batch.
+- Any custom headers configured on the destination.
+
+Success is any 2xx. Anything else, or no response, keeps the batch queued
+and retries with exponential backoff (1 min → 1 h).
+
+## Additional sample fields
+
+All optional, omitted when absent.
+
+| Field | Notes |
+|---|---|
+| `kind` | `quantity`, `category`, `workout`, `route`, `heartbeatSeries`, `electrocardiogram`, `audiogram`, `stateOfMind`, `scoredAssessment`, `visionPrescription`, `medicationDoseEvent`, `correlation`, `characteristics`, `activitySummary`, `medication` |
+| `sourceVersion`, `sourceProductType`, `sourceOSVersion` | from `HKSourceRevision` |
+| `device` | the `HKDevice` fields that are set: `name`, `manufacturer`, `model`, `hardwareVersion`, `firmwareVersion`, `softwareVersion`, `localIdentifier`, `udiDeviceIdentifier` |
+| `metadata` | now the sample's **full** HealthKit metadata for every type (v1 sent it only for workouts). `timeZone` and `protectionUsed` are still folded in as in v1. Nested values pass through as JSON arrays/objects. |
+| `details` | type-specific structure, below |
+
+## Type keys and units
+
+Every quantity, category and characteristic identifier in the iOS SDK the
+app was built with is synced. The key is the identifier without its prefix,
+in lower camel case (`HKQuantityTypeIdentifierVO2Max` → `vo2Max`). The list
+is generated from the SDK headers by `scripts/gen_healthkit_catalog.py`;
+Settings → Coverage on the phone shows what this build syncs and what it
+skips, with the reason.
+
+Units: the 58 v1.1 types keep their v1.1 units (tables above). Every other
+quantity uses the canonical unit HealthKit's headers name for it (`%`
+values are still scaled to 0–100, and `count/s` is sent as `count/min`).
+Category values are the Swift case names of the SDK's value enum
+(`HKCategoryValueSeverity.moderate` → `"moderate"`), `value_<n>` for ones
+the build doesn't know.
+
+Other type keys: `workout`, `workoutRoute`, `heartbeatSeries`,
+`electrocardiogram`, `audiogram`, `stateOfMind` (iOS 18+), `gad7`, `phq9`
+(iOS 18+), `visionPrescription`, `medicationDoseEvent` (iOS 26+),
+`bloodPressure` and `food` (correlations), and the snapshot types
+`characteristics`, `activitySummary`, `medication` (iOS 26+).
+
+## `details` by kind
+
+- **quantity**: for series samples, `count` and (discrete types) `minimum`,
+  `maximum`, `average`, `mostRecent`, in the sample's unit.
+- **workout**: `events` (`type`, `start`, `end`, `duration`, `metadata`),
+  `activities` (multisport segments: `uuid`, `activityType`, `locationType`,
+  `swimmingLocationType`, `lapLengthMeters`, `start`, `end`, `duration`,
+  `metadata`, `events`, `statistics`), `statistics` (per type key: `unit`,
+  `sum`, `average`, `minimum`, `maximum`, `mostRecent`), `routeUUIDs`,
+  `heartRateSampleUUIDs` and `heartRateLink` (`associated` when the recording
+  app tied the samples to the workout, `timeRange` when they were matched by
+  time). The v1 workout fields are unchanged.
+- **route** (`workoutRoute`): `locationFields` names the columns of
+  `locations`, each a row `[secondsFromStart, latitude, longitude, altitude,
+  horizontalAccuracy, verticalAccuracy, speed, course, speedAccuracy,
+  courseAccuracy]`; `workoutUUID` when the parent workout was found.
+- **heartbeatSeries**: `beats` rows `[secondsFromStart, precededByGap]`.
+- **electrocardiogram**: `classification`, `symptomsStatus`,
+  `averageHeartRate`, `samplingFrequencyHz`, `numberOfVoltageMeasurements`,
+  `lead`, `voltages` rows `[secondsFromStart, microvolts]`.
+- **audiogram**: `points`, each with `frequencyHz` and `tests` (`side`,
+  `conductionType`, `masked`, `sensitivityDBHL`, clamping range) on iOS
+  18.1+, or `leftEarDBHL` / `rightEarDBHL` before.
+- **stateOfMind**: `kind`, `valence`, `valenceClassification`, `labels`,
+  `associations`.
+- **scoredAssessment** (`gad7`, `phq9`): `score` (also the `value`), `risk`,
+  `answers`.
+- **visionPrescription**: `prescriptionType`, `dateIssued`, `expirationDate`,
+  `rightEye` / `leftEye` (sphere, cylinder, axis, add power, vertex and
+  pupillary distances, prism; contacts: base curve, diameter), `brand`.
+- **medicationDoseEvent**: `logStatus`, `scheduleType`, `scheduledDate`,
+  `doseQuantity`, `scheduledDoseQuantity`, `unit`, `medicationConcept`, and
+  `medicationName` / `medicationNickname` when the medication is shared.
+- **correlation**: `objects`, the member samples' `uuid`, `type`, `value`,
+  `unit` (the members are also sent as their own samples).
+
+## Snapshots
+
+Characteristics, daily activity summaries and the medication list have no
+sync cursor, so they are sent as records with stable ids, and only when
+their content changes:
+
+- `characteristics` (uuid `characteristics`): `details` holds
+  `dateOfBirth`, `biologicalSex`, `bloodType`, `fitzpatrickSkinType`,
+  `wheelchairUse`, `activityMoveMode`.
+- `activitySummary` (uuid `activitySummary-YYYY-MM-DD`, start/end = that
+  day): move, exercise and stand values with their goals, `activityMoveMode`,
+  `paused`. The first read covers all history; later reads re-check the
+  last 35 days.
+- `medication` (uuid `medication-<concept key>`): `displayText`, `nickname`,
+  `generalForm`, `isArchived`, `hasSchedule`, `relatedCodings`.
+
+Receivers should upsert by uuid.
+
+## Deletions
+
+Tombstones are unchanged: `{"deleted": [uuids]}`.
+
+## Other destinations
+
+- **MQTT**: QoS 1. Each batch publishes one JSON array (bare-array form) per
+  type to `<prefix>/<type>`, and tombstones to `<prefix>/deleted`. The Test
+  button publishes an envelope to `<prefix>/test`.
+- **Home Assistant**: the envelope, uncompressed, at most 200 items per
+  request, with arrays longer than 50 entries in `details` replaced by
+  `<name>Count`.
+- **File export**: NDJSON lines appended to `pulso-YYYY-MM-DD.ndjson` (the
+  day of export) in the chosen folder.
