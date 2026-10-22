@@ -89,7 +89,7 @@ def parse_enums(path, wanted=None):
         cases = []
         nxt = 0
         for raw in body.split("\n"):
-            raw = raw.strip()
+            raw = re.sub(r"//.*$", "", raw).strip()
             if not raw or raw.startswith(("//", "/*", "*")):
                 continue
             cm = re.match(r"^(\w+)(.*?)(?:=\s*([\w-]+))?\s*,?\s*$", raw)

@@ -12,9 +12,9 @@ struct SnapshotSource: Identifiable {
     let readTypes: Set<HKObjectType>
     /// Types needing a per-object grant (a user tap) instead of the read set.
     let perObjectType: HKObjectType?
-    /// `firstRead` is true when nothing was delivered yet, so the read
-    /// should cover all history rather than a recent window.
-    let read: @Sendable (_ queries: HealthQueries, _ context: SerializerContext, _ firstRead: Bool) async throws -> [SampleDTO]
+    /// `delivered` holds the record keys (and fingerprints) already queued;
+    /// nil when nothing was, so the read should cover all history.
+    let read: @Sendable (_ queries: HealthQueries, _ context: SerializerContext, _ delivered: [String: String]?) async throws -> [SampleDTO]
 
     var id: String { key }
 }
@@ -93,11 +93,20 @@ enum Snapshots {
         group: TypeRegistry.Group.summaries,
         readTypes: [HKObjectType.activitySummaryType()],
         perObjectType: nil
-    ) { queries, context, firstRead in
+    ) { queries, context, delivered in
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = context.defaultTimeZone()
         let today = calendar.startOfDay(for: Date())
-        let from = firstRead ? historyStart : calendar.date(byAdding: .day, value: -recentDays, to: today)!
+        let recent = calendar.date(byAdding: .day, value: -recentDays, to: today)!
+        let from: Date
+        if let delivered {
+            // After a gap longer than the recent window, resume from the
+            // last day already sent so no day in between is skipped.
+            let lastSent = delivered.keys.compactMap { summaryDay(fromKey: $0, calendar: calendar) }.max()
+            from = min(lastSent ?? historyStart, recent)
+        } else {
+            from = historyStart
+        }
         var start = calendar.dateComponents([.era, .year, .month, .day], from: from)
         start.calendar = calendar
         var end = calendar.dateComponents([.era, .year, .month, .day], from: today)
@@ -133,6 +142,13 @@ enum Snapshots {
                 type: "activitySummary", start: day, end: next, context: context, details: details
             )
         }
+    }
+
+    private static func summaryDay(fromKey key: String, calendar: Calendar) -> Date? {
+        let parts = key.split(separator: "-")
+        guard parts.count == 4, parts[0] == "activitySummary",
+              let year = Int(parts[1]), let month = Int(parts[2]), let day = Int(parts[3]) else { return nil }
+        return calendar.date(from: DateComponents(year: year, month: month, day: day))
     }
 
     // MARK: - Medications

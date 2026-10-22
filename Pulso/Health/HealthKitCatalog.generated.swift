@@ -310,7 +310,7 @@ enum HealthKitCatalog {
         "HKInsulinDeliveryReason": [1: "basal", 2: "bolus"],
         "HKMedicationDoseEventLogStatus": [1: "notInteracted", 2: "notificationNotSent", 3: "snoozed", 4: "taken", 5: "skipped", 6: "notLogged"],
         "HKMedicationDoseEventScheduleType": [1: "asNeeded", 2: "schedule"],
-        "HKMetricPrefix": [0: "none", 1: "femto", 2: "pico", 3: "nano", 4: "micro", 5: "milli", 6: "centi", 7: "deci", 8: "deca", 9: "hecto", 10: "kilo", 11: "mega", 12: "giga", 13: "tera"],
+        "HKMetricPrefix": [0: "none", 1: "pico", 2: "nano", 3: "micro", 4: "milli", 5: "centi", 6: "deci", 7: "deca", 8: "hecto", 9: "kilo", 10: "mega", 11: "giga", 12: "tera", 13: "femto"],
         "HKPHQ9AssessmentAnswer": [0: "notAtAll", 1: "severalDays", 2: "moreThanHalfTheDays", 3: "nearlyEveryDay", 4: "preferNotToAnswer"],
         "HKPHQ9AssessmentRisk": [1: "noneToMinimal", 2: "mild", 3: "moderate", 4: "moderatelySevere", 5: "severe"],
         "HKPhysicalEffortEstimationType": [1: "activityLookup", 2: "deviceSensed"],

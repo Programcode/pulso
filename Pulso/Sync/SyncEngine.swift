@@ -276,19 +276,33 @@ actor SyncEngine {
     /// Reads a snapshot source and queues the records whose content changed
     /// since the last delivered read. The new fingerprints ride in the
     /// batch's anchor slot, so they are persisted only once the server ACKs.
+    ///
+    /// Each version of a record gets its own uuid (stable key + content
+    /// fingerprint) and the version it replaces is tombstoned, so receivers
+    /// that keep the first copy of a uuid still end up with the latest
+    /// content. `details.recordKey` carries the stable key.
     private func syncSnapshot(_ source: SnapshotSource) async throws -> Int {
         let stored = anchors.loadRaw(source.key)
         let delivered = snapshotCache[source.key]
             ?? stored.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
-        let records = try await source.read(queries, .live, delivered == nil)
+        let records = try await source.read(queries, .live, delivered)
         var state = delivered ?? [:]
         var changed: [SampleDTO] = []
+        var superseded: [String] = []
         for record in records {
+            let key = record.uuid
             let fingerprint = Self.fingerprint(record)
-            if state[record.uuid] != fingerprint {
-                state[record.uuid] = fingerprint
-                changed.append(record)
+            guard state[key] != fingerprint else { continue }
+            if let previous = state[key] {
+                superseded.append(Self.versionedUUID(key, previous))
             }
+            state[key] = fingerprint
+            var versioned = record
+            versioned.uuid = Self.versionedUUID(key, fingerprint)
+            var details = versioned.details ?? [:]
+            details["recordKey"] = .string(key)
+            versioned.details = details
+            changed.append(versioned)
         }
         await status.recordChecked(source.key)
         let encoded = try JSONEncoder().encode(state)
@@ -296,10 +310,18 @@ actor SyncEngine {
             if stored == nil { anchors.saveRaw(encoded, for: source.key) }
             return 0
         }
-        try await outbox.enqueue(typeKey: source.key, elements: changed.map(BatchElement.sample), anchor: encoded)
+        var elements = changed.map(BatchElement.sample)
+        if !superseded.isEmpty {
+            elements.append(.tombstone(superseded))
+        }
+        try await outbox.enqueue(typeKey: source.key, elements: elements, anchor: encoded)
         snapshotCache[source.key] = state
         await log.info("\(source.key): queued \(changed.count) changed record(s)")
         return changed.count
+    }
+
+    static func versionedUUID(_ key: String, _ fingerprint: String) -> String {
+        "\(key)-\(fingerprint.prefix(12))"
     }
 
     /// Content identity of a snapshot record; timestamps are left out
