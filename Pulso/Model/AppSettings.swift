@@ -2,6 +2,7 @@ import Foundation
 import Observation
 
 enum SettingsKeys {
+    /// The single server URL from before destinations; read once to migrate.
     static let endpoint = "server.endpoint"
     static let enabledTypes = "types.enabled"
     static let tokenAccount = "server-token"
@@ -11,6 +12,7 @@ enum SettingsKeys {
     /// catch-up shortcut is disabled so the re-import cannot be defeated by
     /// an interleaved or resumed pass.
     static let reimportPending = "sync.reimportPending"
+    static let destinations = "destinations.v1"
 }
 
 /// User configuration. The @Observable instance drives the UI; the static
@@ -19,29 +21,54 @@ enum SettingsKeys {
 @Observable
 @MainActor
 final class AppSettings {
-    var endpoint: String {
-        didSet { UserDefaults.standard.set(endpoint, forKey: SettingsKeys.endpoint) }
-    }
-
-    var token: String {
-        didSet { Keychain.set(token.isEmpty ? nil : token, for: SettingsKeys.tokenAccount) }
-    }
-
     private var enabled: [String: Bool] {
         didSet { UserDefaults.standard.set(enabled, forKey: SettingsKeys.enabledTypes) }
     }
 
+    /// Where data goes. Saved on every change; secrets are kept in the
+    /// Keychain by Destination itself.
+    var destinations: [Destination] {
+        didSet { Self.storeDestinations(destinations) }
+    }
+
     init() {
-        endpoint = UserDefaults.standard.string(forKey: SettingsKeys.endpoint) ?? ""
-        token = Keychain.string(for: SettingsKeys.tokenAccount) ?? ""
+        Self.migrateLegacyEndpoint()
         enabled = Self.storedEnabled()
+        destinations = Self.currentDestinations()
+    }
+
+    /// Before destinations, Pulso had one server URL and token. A non-empty
+    /// one becomes a "Pulso server" destination, once.
+    nonisolated static func migrateLegacyEndpoint() {
+        let defaults = UserDefaults.standard
+        guard defaults.data(forKey: SettingsKeys.destinations) == nil else { return }
+        var migrated: [Destination] = []
+        if let raw = defaults.string(forKey: SettingsKeys.endpoint), baseURL(from: raw) != nil {
+            var destination = Destination(name: "Pulso server", kind: .pulso)
+            destination.url = raw
+            destination.bearerToken = Keychain.string(for: SettingsKeys.tokenAccount)
+            migrated.append(destination)
+        }
+        storeDestinations(migrated)
+    }
+
+    nonisolated static func storeDestinations(_ destinations: [Destination]) {
+        if let data = try? JSONEncoder().encode(destinations) {
+            UserDefaults.standard.set(data, forKey: SettingsKeys.destinations)
+        }
+    }
+
+    nonisolated static func currentDestinations() -> [Destination] {
+        guard let data = UserDefaults.standard.data(forKey: SettingsKeys.destinations) else { return [] }
+        return (try? JSONDecoder().decode([Destination].self, from: data)) ?? []
+    }
+
+    nonisolated static func activeDestinations() -> [Destination] {
+        currentDestinations().filter { $0.enabled && $0.isConfigured }
     }
 
     func isEnabled(_ key: String) -> Bool { enabled[key] ?? true }
     func setEnabled(_ key: String, _ value: Bool) { enabled[key] = value }
-
-    var baseURL: URL? { Self.baseURL(from: endpoint) }
-    var healthURL: URL? { baseURL.flatMap { URL(string: $0.absoluteString + "/health") } }
 
     // MARK: - Shared parsing / thread-safe accessors
 
@@ -52,19 +79,6 @@ final class AppSettings {
         while s.hasSuffix("/") { s.removeLast() }
         guard let url = URL(string: s), url.host() != nil else { return nil }
         return url
-    }
-
-    /// Where to POST, resolved at send time. nil = not configured yet.
-    nonisolated static func currentTarget() -> (url: URL, token: String?)? {
-        guard let base = currentBase(),
-              let url = URL(string: base.url.absoluteString + "/ingest") else { return nil }
-        return (url, base.token)
-    }
-
-    nonisolated static func currentBase() -> (url: URL, token: String?)? {
-        let raw = UserDefaults.standard.string(forKey: SettingsKeys.endpoint) ?? ""
-        guard let base = baseURL(from: raw) else { return nil }
-        return (base, Keychain.string(for: SettingsKeys.tokenAccount))
     }
 
     nonisolated static func currentEnabled(_ key: String) -> Bool {

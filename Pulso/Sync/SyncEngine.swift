@@ -9,6 +9,8 @@ enum SyncReason: CustomStringConvertible, Sendable {
     case backgroundRefresh
     case settingsChanged
     case reimport
+    case intent(String)
+    case processing
 
     var description: String {
         switch self {
@@ -18,6 +20,8 @@ enum SyncReason: CustomStringConvertible, Sendable {
         case .backgroundRefresh: "background refresh"
         case .settingsChanged: "settings changed"
         case .reimport: "full re-import"
+        case .intent(let name): "shortcut: \(name)"
+        case .processing: "background processing"
         }
     }
 }
@@ -44,19 +48,18 @@ enum CatchUp {
     }
 }
 
-/// Per enabled type: run an anchored query from the last anchor, hand the
-/// results to the outbox, and let the outbox persist the new anchor once the
-/// server ACKs. An in-memory anchor cache leads the persisted one so
-/// overlapping triggers don't re-read samples that are already queued; after
-/// a crash the cache is gone, the persisted anchor wins, and any re-read
-/// samples dedupe server-side by uuid.
+/// Per enabled type: run an anchored query from the last anchor, write the
+/// results into every destination's durable queue, then persist the new
+/// anchor. The data is on disk before the anchor moves, and each queue
+/// deletes a batch only once its destination accepts it; a crash between
+/// the two re-reads samples that receivers dedupe by uuid.
 actor SyncEngine {
     static let queryLimit = 5000
 
     private let healthStore: HKHealthStore
     private let queries: HealthQueries
     private let anchors: AnchorStore
-    private let outbox: Outbox
+    private let outbox: OutboxHub
     private let log: LogStore
     private let status: AppStatus
     /// GET /latest from the configured server; nil when unavailable.
@@ -77,7 +80,7 @@ actor SyncEngine {
     private static let latestCacheInterval: TimeInterval = 15 * 60
 
     init(
-        healthStore: HKHealthStore, anchors: AnchorStore, outbox: Outbox,
+        healthStore: HKHealthStore, anchors: AnchorStore, outbox: OutboxHub,
         log: LogStore, status: AppStatus,
         latestHints: @escaping @Sendable () async -> [String: String]? = { nil }
     ) {
@@ -105,11 +108,12 @@ actor SyncEngine {
     }
 
     private func performSync(_ reason: SyncReason, only keys: Set<String>?) async {
-        guard AppSettings.currentTarget() != nil else {
-            await log.info("sync skipped (\(reason)): no server configured")
+        guard await outbox.hasActiveDestination() else {
+            await log.info("sync skipped (\(reason)): no destination configured")
             return
         }
         await status.setSyncing(true)
+        await status.recordSyncStarted()
         // Types this OS refused at authorization would only fail their query.
         let refused = HealthAuthorization.lastRejected()
         let enabled = AppSettings.currentEnabledTypes().filter {
@@ -119,9 +123,9 @@ actor SyncEngine {
         // A user-visible pass may follow a permission grant — retry types
         // that were failing. Background wakes keep them excluded.
         switch reason {
-        case .manual, .foreground, .settingsChanged, .reimport:
+        case .manual, .foreground, .settingsChanged, .reimport, .intent:
             authBlocked.removeAll()
-        case .observer, .backgroundRefresh:
+        case .observer, .backgroundRefresh, .processing:
             break
         }
 
@@ -170,15 +174,13 @@ actor SyncEngine {
             }
         }
         // Snapshots have no observer of their own; they ride along on every
-        // full pass.
-        if keys == nil {
-            for source in AppSettings.currentEnabledSnapshots() {
-                do {
-                    queued += try await syncSnapshot(source)
-                } catch {
-                    anyFailed = true
-                    await log.error("\(source.key): \(error.localizedDescription)")
-                }
+        // full pass, or when a shortcut names them.
+        for source in AppSettings.currentEnabledSnapshots() where keys?.contains(source.key) ?? true {
+            do {
+                queued += try await syncSnapshot(source)
+            } catch {
+                anyFailed = true
+                await log.error("\(source.key): \(error.localizedDescription)")
             }
         }
         if reimporting && !anyFailed && keys == nil {
@@ -187,14 +189,96 @@ actor SyncEngine {
         }
         let force: Bool
         switch reason {
-        case .manual, .foreground, .settingsChanged, .reimport: force = true
+        case .manual, .foreground, .settingsChanged, .reimport, .intent, .processing: force = true
         case .observer, .backgroundRefresh: force = false
         }
         await outbox.drain(force: force)
+        let pending = await outbox.pendingCount()
+        let failed = authBlocked.sorted()
+        var summary = "\(reason): queued \(queued) sample(s), \(pending) batch(es) waiting"
+        if !failed.isEmpty {
+            summary += ", \(failed.count) type(s) failing (\(failed.prefix(5).joined(separator: ", ")))"
+        }
+        await status.recordSyncFinished(summary)
         await status.setSyncing(false)
         if queued > 0 {
             await log.info("sync (\(reason)): queued \(queued) sample(s)")
         }
+    }
+
+    /// Re-sends what HealthKit holds between `start` and `end` (open ends
+    /// mean all of it) without touching anchors: the backfill shortcut.
+    /// Serialized with sync passes.
+    func resend(only keys: Set<String>?, start: Date?, end: Date?, reason: SyncReason) async -> String {
+        let previous = chain
+        let task = Task { () -> String in
+            await previous?.value
+            return await self.performResend(only: keys, start: start, end: end, reason: reason)
+        }
+        chain = Task { _ = await task.value }
+        return await task.value
+    }
+
+    private func performResend(only keys: Set<String>?, start: Date?, end: Date?, reason: SyncReason) async -> String {
+        guard await outbox.hasActiveDestination() else { return "No destination is configured." }
+        await status.setSyncing(true)
+        await status.recordSyncStarted()
+        let refused = HealthAuthorization.lastRejected()
+        let types = AppSettings.currentEnabledTypes().filter {
+            !refused.contains($0.sampleType.identifier) && (keys?.contains($0.key) ?? true)
+        }
+        let predicate = (start != nil || end != nil) ? HKQuery.predicateForSamples(withStart: start, end: end) : nil
+        var queued = 0
+        var failed: [String] = []
+        for type in types {
+            do {
+                var anchor: HKQueryAnchor?
+                while true {
+                    let descriptor = HKAnchoredObjectQueryDescriptor(
+                        predicates: [.sample(type: type.sampleType, predicate: predicate)],
+                        anchor: anchor, limit: type.queryLimit
+                    )
+                    let result = try await descriptor.result(for: healthStore)
+                    var dtos: [SampleDTO] = []
+                    for sample in result.addedSamples {
+                        guard let dto = type.serialize(sample, .live) else { continue }
+                        dtos.append(try await type.enrich?(queries, dto, sample) ?? dto)
+                    }
+                    if !dtos.isEmpty {
+                        try await outbox.enqueue(typeKey: type.key, elements: dtos.map(BatchElement.sample))
+                        queued += dtos.count
+                        await log.info("\(type.key): re-queued \(dtos.count) sample(s)")
+                    }
+                    anchor = normalize(result.newAnchor)
+                    if result.addedSamples.count < type.queryLimit || anchor == nil { break }
+                }
+            } catch {
+                failed.append(type.key)
+                await log.error("\(type.key): \(error.localizedDescription)")
+            }
+        }
+        for source in AppSettings.currentEnabledSnapshots() where keys?.contains(source.key) ?? true {
+            do {
+                let records = try await source.read(queries, .live, true)
+                if !records.isEmpty {
+                    try await outbox.enqueue(typeKey: source.key, elements: records.map(BatchElement.sample))
+                    queued += records.count
+                }
+            } catch {
+                failed.append(source.key)
+                await log.error("\(source.key): \(error.localizedDescription)")
+            }
+        }
+        await outbox.drain(force: true)
+        let pending = await outbox.pendingCount()
+        var summary = "\(reason): re-sent \(queued) record(s) from \(types.count) type(s), \(pending) batch(es) waiting"
+        if !failed.isEmpty {
+            summary += ", failed: \(failed.prefix(5).joined(separator: ", "))"
+        }
+        await status.recordSyncFinished(summary)
+        await status.setSyncing(false)
+        await log.info(summary)
+        return summary
     }
 
     private func cachedLatestHints() async -> [String: String]? {
@@ -254,9 +338,9 @@ actor SyncEngine {
             if !deleted.isEmpty {
                 elements.append(.tombstone(deleted))
             }
-            let anchorData = newAnchor.flatMap { anchors.archive($0) }
-            try await outbox.enqueue(typeKey: type.key, elements: elements, anchor: anchorData)
+            try await outbox.enqueue(typeKey: type.key, elements: elements)
             if let newAnchor {
+                anchors.save(newAnchor, for: type.key)
                 anchorCache[type.key] = newAnchor
                 anchor = newAnchor
             }
@@ -274,8 +358,8 @@ actor SyncEngine {
     }
 
     /// Reads a snapshot source and queues the records whose content changed
-    /// since the last delivered read. The new fingerprints ride in the
-    /// batch's anchor slot, so they are persisted only once the server ACKs.
+    /// since the last queued read; the new fingerprints are saved once the
+    /// records are on disk, like an anchor.
     ///
     /// Each version of a record gets its own uuid (stable key + content
     /// fingerprint) and the version it replaces is tombstoned, so receivers
@@ -314,7 +398,8 @@ actor SyncEngine {
         if !superseded.isEmpty {
             elements.append(.tombstone(superseded))
         }
-        try await outbox.enqueue(typeKey: source.key, elements: elements, anchor: encoded)
+        try await outbox.enqueue(typeKey: source.key, elements: elements)
+        anchors.saveRaw(encoded, for: source.key)
         snapshotCache[source.key] = state
         await log.info("\(source.key): queued \(changed.count) changed record(s)")
         return changed.count

@@ -11,6 +11,7 @@ final class TriggerHub {
     /// Fixed rather than derived from the bundle id: Info.plist lists it
     /// verbatim, and a re-signed build may run under a different bundle id.
     static let refreshTaskID = "pulso.refresh"
+    static let processingTaskID = "pulso.processing"
 
     private let healthStore: HKHealthStore
     private let engine: SyncEngine
@@ -26,7 +27,47 @@ final class TriggerHub {
     // MARK: - BGAppRefreshTask
 
     /// Must run before application(_:didFinishLaunchingWithOptions:) returns.
-    func registerBackgroundRefresh() {
+    func registerBackgroundTasks() {
+        registerBackgroundRefresh()
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.processingTaskID, using: nil) { [weak self] task in
+            guard let processing = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            Task { @MainActor [weak self] in
+                self?.handleProcessing(processing)
+            }
+        }
+    }
+
+    // MARK: - BGProcessingTask
+
+    /// A longer background window (typically overnight, on power) for
+    /// catching up and draining queues that a refresh couldn't finish.
+    private func handleProcessing(_ task: BGProcessingTask) {
+        scheduleProcessing()
+        let work = Task {
+            await log.info("background processing fired")
+            await engine.requestSync(.processing)
+            if !Task.isCancelled {
+                task.setTaskCompleted(success: true)
+            }
+        }
+        task.expirationHandler = {
+            work.cancel()
+            task.setTaskCompleted(success: false)
+        }
+    }
+
+    func scheduleProcessing() {
+        let request = BGProcessingTaskRequest(identifier: Self.processingTaskID)
+        request.requiresNetworkConnectivity = true
+        request.requiresExternalPower = false
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 2 * 3600)
+        try? BGTaskScheduler.shared.submit(request) // unsupported on simulator; fine
+    }
+
+    private func registerBackgroundRefresh() {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshTaskID, using: nil) { [weak self] task in
             guard let refresh = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)

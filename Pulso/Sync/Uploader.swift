@@ -42,11 +42,10 @@ struct HTTPUploader: Uploading {
         )
     }
 
-    /// GET <base>/latest — per-type newest sample timestamp on the server.
+    /// GET <…>/latest — per-type newest sample timestamp on the server.
     /// nil on any failure (older servers without the endpoint included);
     /// callers fall back to a full backfill.
-    func fetchLatest(base: URL, token: String?) async -> [String: String]? {
-        guard let url = URL(string: base.absoluteString + "/latest") else { return nil }
+    func fetchLatest(url: URL, token: String?) async -> [String: String]? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         if let token, !token.isEmpty {
