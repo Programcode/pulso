@@ -94,7 +94,8 @@ actor SyncEngine {
     private let log: LogStore
     private let status: AppStatus
     /// GET /latest from the configured server; nil when unavailable.
-    private let latestHints: @Sendable () async -> [String: String]?
+    /// GET /latest from the given destinations; nil when unavailable.
+    private let latestHints: @Sendable ([Destination]) async -> [String: String]?
     private var anchorCache: [String: HKQueryAnchor] = [:]
     /// Snapshot state as last queued; survives in memory between passes.
     private var snapshotCache: [String: SnapshotState] = [:]
@@ -114,7 +115,7 @@ actor SyncEngine {
     init(
         healthStore: HKHealthStore, anchors: AnchorStore, outbox: OutboxHub,
         log: LogStore, status: AppStatus,
-        latestHints: @escaping @Sendable () async -> [String: String]? = { nil }
+        latestHints: @escaping @Sendable ([Destination]) async -> [String: String]? = { _ in nil }
     ) {
         self.healthStore = healthStore
         queries = HealthQueries(store: healthStore)
@@ -339,12 +340,15 @@ actor SyncEngine {
     /// Hints plus the key of the destination set they belong to. A set that
     /// changed while the request was in flight discards the answer.
     private func cachedLatestHints() async -> (hints: [String: String], key: String)? {
-        let destinations = AppSettings.catchUpKey(AppSettings.receivingDestinations())
+        // One snapshot of the destination list gives both the key and the
+        // servers asked, so the key always names the set that answered.
+        let snapshot = AppSettings.receivingDestinations()
+        let destinations = AppSettings.catchUpKey(snapshot)
         if let cached = latestFetch, cached.destinations == destinations,
            Date().timeIntervalSince(cached.at) < Self.latestCacheInterval {
             return cached.hints.map { ($0, destinations) }
         }
-        let hints = await latestHints()
+        let hints = await latestHints(snapshot)
         guard AppSettings.catchUpKey(AppSettings.receivingDestinations()) == destinations else { return nil }
         latestFetch = (Date(), destinations, hints)
         return hints.map { ($0, destinations) }

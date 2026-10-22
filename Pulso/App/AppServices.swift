@@ -39,11 +39,10 @@ final class AppServices {
         let uploader = uploader
         engine = SyncEngine(
             healthStore: healthStore, anchors: anchors, outbox: outbox, log: log, status: status,
-            latestHints: {
+            latestHints: { destinations in
                 // The anchor is shared, so skipping history is only safe when
                 // every destination already has it: all must answer, and the
                 // earliest answer per type wins.
-                let destinations = AppSettings.receivingDestinations()
                 guard !destinations.isEmpty, destinations.allSatisfy({ $0.latestURL != nil }) else { return nil }
                 var answers: [[String: String]] = []
                 for destination in destinations {
