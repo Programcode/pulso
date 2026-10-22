@@ -113,8 +113,6 @@ final class AppSettings {
         currentDestinations().filter(\.receivesBatches)
     }
 
-    }
-
     func isEnabled(_ key: String) -> Bool { enabled[key] ?? true }
     func setEnabled(_ key: String, _ value: Bool) { enabled[key] = value }
 
