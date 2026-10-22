@@ -140,6 +140,10 @@ final class DestinationTests: XCTestCase {
         ])
         XCTAssertEqual(merged, ["heartRate": "2026-07-10T08:00:00+02:00"])
         XCTAssertEqual(CatchUp.earliest([]), [:])
+        XCTAssertEqual(
+            CatchUp.earliest([["heartRate": "2026-07-15T08:59:12+01:00"], ["heartRate": ""]]), [:],
+            "an unparseable answer must not leave the other server's cutoff in place"
+        )
     }
 
     func testResendRangeMatchesOverlappingRecordsOnly() {

@@ -45,7 +45,13 @@ enum CatchUp {
                     merged[type] = nil
                     continue
                 }
-                if let a = parse(value), let b = parse(other), b < a {
+                // A timestamp that doesn't parse says nothing safe about
+                // what that server holds: no catch-up for the type.
+                guard let a = parse(value), let b = parse(other) else {
+                    merged[type] = nil
+                    continue
+                }
+                if b < a {
                     merged[type] = other
                 }
             }
@@ -100,7 +106,9 @@ actor SyncEngine {
     private var authBlocked: Set<String> = []
     /// GET /latest result (including failure) cached briefly so background
     /// wakes don't pay a network round-trip per pass.
-    private var latestFetch: (at: Date, hints: [String: String]?)?
+    /// Keyed by the destinations that answered: a hint is only valid for
+    /// the exact set of destinations it was gathered from.
+    private var latestFetch: (at: Date, destinations: String, hints: [String: String]?)?
     private static let latestCacheInterval: TimeInterval = 15 * 60
 
     init(
@@ -327,11 +335,16 @@ actor SyncEngine {
     }
 
     private func cachedLatestHints() async -> [String: String]? {
-        if let cached = latestFetch, Date().timeIntervalSince(cached.at) < Self.latestCacheInterval {
+        let destinations = AppSettings.activeDestinations()
+            .map { "\($0.id.uuidString)|\($0.latestURL?.absoluteString ?? "-")" }
+            .sorted()
+            .joined(separator: ",")
+        if let cached = latestFetch, cached.destinations == destinations,
+           Date().timeIntervalSince(cached.at) < Self.latestCacheInterval {
             return cached.hints
         }
         let hints = await latestHints()
-        latestFetch = (Date(), hints)
+        latestFetch = (Date(), destinations, hints)
         return hints
     }
 
