@@ -11,12 +11,23 @@ struct SampleDTO: Codable, Equatable, Sendable {
     var unit: String? = nil
     var source: String
     var sourceBundleId: String? = nil
-    /// For workouts: the sample's full HealthKit metadata dictionary. For
-    /// every other type the only key is "timeZone". In both cases "timeZone"
-    /// appears only when the sample itself recorded one (HKMetadataKeyTimeZone);
+    /// The sample's full HealthKit metadata dictionary. "timeZone" appears
+    /// only when the sample itself recorded one (HKMetadataKeyTimeZone);
     /// absent means the timestamps' offset is the device timezone at sync
     /// time — an assumption, not a recorded fact.
     var metadata: [String: JSONValue]? = nil
+
+    /// What sort of HealthKit object this is: quantity, category, workout,
+    /// route, heartbeatSeries, electrocardiogram, ... Absent on v1 senders.
+    var kind: String? = nil
+    var sourceVersion: String? = nil
+    var sourceProductType: String? = nil
+    var sourceOSVersion: String? = nil
+    /// HKDevice fields that are set (name, manufacturer, model, ...).
+    var device: [String: JSONValue]? = nil
+    /// Type-specific structure: route locations, ECG voltages, workout
+    /// events and activities, series statistics, prescription lenses, ...
+    var details: [String: JSONValue]? = nil
 
     // Workouts only.
     var workoutActivityType: String? = nil
@@ -29,26 +40,35 @@ struct SampleDTO: Codable, Equatable, Sendable {
     var maximumHeartRate: Double? = nil
 }
 
-/// A metadata value on the wire. HealthKit metadata is heterogeneous;
-/// strings, numbers, and booleans pass through natively and anything else
-/// (HKQuantity, dates) is stringified by the serializer.
+/// Any JSON value. HealthKit metadata is heterogeneous: strings, numbers,
+/// and booleans pass through natively and anything else (HKQuantity, dates)
+/// is stringified by the serializer. `details` uses arrays and objects.
 enum JSONValue: Codable, Equatable, Sendable {
     case string(String)
     case number(Double)
     case bool(Bool)
+    case array([JSONValue])
+    case object([String: JSONValue])
+    case null
 
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        if let s = try? container.decode(String.self) {
+        if container.decodeNil() {
+            self = .null
+        } else if let s = try? container.decode(String.self) {
             self = .string(s)
         } else if let b = try? container.decode(Bool.self) {
             self = .bool(b)
         } else if let n = try? container.decode(Double.self) {
             self = .number(n)
+        } else if let a = try? container.decode([JSONValue].self) {
+            self = .array(a)
+        } else if let o = try? container.decode([String: JSONValue].self) {
+            self = .object(o)
         } else {
             throw DecodingError.typeMismatch(
                 JSONValue.self,
-                .init(codingPath: decoder.codingPath, debugDescription: "metadata values must be string, number, or bool")
+                .init(codingPath: decoder.codingPath, debugDescription: "not a JSON value")
             )
         }
     }
@@ -59,7 +79,22 @@ enum JSONValue: Codable, Equatable, Sendable {
         case .string(let s): try container.encode(s)
         case .number(let n): try container.encode(n)
         case .bool(let b): try container.encode(b)
+        case .array(let a): try container.encode(a)
+        case .object(let o): try container.encode(o)
+        case .null: try container.encodeNil()
         }
+    }
+}
+
+extension JSONValue: ExpressibleByStringLiteral, ExpressibleByFloatLiteral, ExpressibleByIntegerLiteral,
+    ExpressibleByBooleanLiteral, ExpressibleByArrayLiteral, ExpressibleByDictionaryLiteral {
+    init(stringLiteral value: String) { self = .string(value) }
+    init(floatLiteral value: Double) { self = .number(value) }
+    init(integerLiteral value: Int) { self = .number(Double(value)) }
+    init(booleanLiteral value: Bool) { self = .bool(value) }
+    init(arrayLiteral elements: JSONValue...) { self = .array(elements) }
+    init(dictionaryLiteral elements: (String, JSONValue)...) {
+        self = .object(Dictionary(elements, uniquingKeysWith: { _, last in last }))
     }
 }
 

@@ -21,6 +21,12 @@ struct AnchorStore: Sendable {
         return try? NSKeyedUnarchiver.unarchivedObject(ofClass: HKQueryAnchor.self, from: data)
     }
 
+    /// The stored bytes as-is: snapshot sources keep their delivered-state
+    /// fingerprints here instead of an HKQueryAnchor.
+    func loadRaw(_ key: String) -> Data? {
+        try? Data(contentsOf: url(for: key))
+    }
+
     func archive(_ anchor: HKQueryAnchor) -> Data? {
         try? NSKeyedArchiver.archivedData(withRootObject: anchor, requiringSecureCoding: true)
     }

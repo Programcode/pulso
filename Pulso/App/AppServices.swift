@@ -74,8 +74,8 @@ final class AppServices {
         hub.registerBackgroundRefresh()
         hub.scheduleNextRefresh()
         Task {
-            await hub.startObservers()
             await refreshAuthStatus()
+            await hub.startObservers()
             await refreshDerived()
         }
     }
@@ -103,9 +103,23 @@ final class AppServices {
         await refreshDerived()
     }
 
+    /// The read set this OS accepts, probed once per launch (cheap, no UI).
+    private lazy var readSet: HealthAuthorization.ReadSet = {
+        let set = HealthAuthorization.readSet(TypeRegistry.readTypes, store: healthStore)
+        let log = log
+        let rejected = set.rejected
+        Task {
+            await log.info("Health read set: \(set.accepted.count) type(s) accepted")
+            for (identifier, reason) in rejected.sorted(by: { $0.key < $1.key }) {
+                await log.warn("HealthKit refuses read access to \(identifier) on this iOS — skipped (\(reason.prefix(160)))")
+            }
+        }
+        return set
+    }()
+
     func requestHealthAccess() async {
         do {
-            try await healthStore.requestAuthorization(toShare: [], read: TypeRegistry.readTypes)
+            try await HealthAuthorization.request(readSet.accepted, store: healthStore)
         } catch {
             await log.error("authorization request failed: \(error.localizedDescription)")
         }
@@ -113,10 +127,23 @@ final class AppServices {
         await syncNow(.manual)
     }
 
+    /// Vision prescriptions and medications are shared object by object:
+    /// HealthKit shows its own picker, which needs a user tap to open.
+    func requestPerObjectAccess(_ key: String) async {
+        guard let entry = TypeRegistry.perObjectTypes.first(where: { $0.key == key }) else { return }
+        do {
+            try await healthStore.requestPerObjectReadAuthorization(for: entry.type, predicate: nil)
+            await log.info("\(key): per-object access updated")
+        } catch {
+            await log.error("\(key): per-object access failed: \(error.localizedDescription)")
+        }
+        await syncNow(.manual)
+    }
+
     func refreshAuthStatus() async {
         guard !status.healthUnavailable else { return }
         do {
-            let request = try await healthStore.statusForAuthorizationRequest(toShare: [], read: TypeRegistry.readTypes)
+            let request = try await HealthAuthorization.requestStatus(readSet.accepted, store: healthStore)
             status.authNeeded = request == .shouldRequest
         } catch {
             // Typically a signing problem (missing HealthKit entitlement) —
@@ -128,7 +155,11 @@ final class AppServices {
     }
 
     func refreshDerived() async {
-        status.needsInitialImport = AppSettings.currentEnabledTypes().contains { !anchors.hasAnchor($0.key) }
+        let refused = HealthAuthorization.lastRejected()
+        let pendingKeys = AppSettings.currentEnabledTypes()
+            .filter { !refused.contains($0.sampleType.identifier) }
+            .map(\.key) + AppSettings.currentEnabledSnapshots().map(\.key)
+        status.needsInitialImport = pendingKeys.contains { !anchors.hasAnchor($0) }
         await outbox.refreshPendingStatus()
     }
 

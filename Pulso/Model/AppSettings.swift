@@ -75,6 +75,10 @@ final class AppSettings {
         TypeRegistry.all.filter { currentEnabled($0.key) }
     }
 
+    nonisolated static func currentEnabledSnapshots() -> [SnapshotSource] {
+        TypeRegistry.snapshots.filter { currentEnabled($0.key) }
+    }
+
     nonisolated private static func storedEnabled() -> [String: Bool] {
         (UserDefaults.standard.dictionary(forKey: SettingsKeys.enabledTypes) ?? [:])
             .compactMapValues { $0 as? Bool }

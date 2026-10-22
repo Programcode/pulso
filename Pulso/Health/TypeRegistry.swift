@@ -1,245 +1,353 @@
 import Foundation
 import HealthKit
 
-/// One syncable HealthKit type: its wire key, how eagerly HealthKit may wake
-/// us for it, and how its samples serialize. Adding a type is a table row.
+/// One syncable HealthKit sample type: its wire key, how eagerly HealthKit
+/// may wake us for it, and how its samples serialize.
 struct SyncedType: Identifiable {
+    enum Access {
+        /// Requested in the read set with requestAuthorization.
+        case read
+        /// Needs requestPerObjectReadAuthorization from a user tap.
+        case perObject
+        /// Not authorizable itself; readable when its member types are
+        /// (blood pressure and food correlations).
+        case viaComponents
+    }
+
     let key: String // wire "type" value and persistence key
     let displayName: String
     let group: String // UI section
     let sampleType: HKSampleType
     let frequency: HKUpdateFrequency
+    var access: Access = .read
+    /// Samples per anchored query page. Lower for types whose samples are
+    /// large (route locations, ECG voltages) or need follow-up queries.
+    var queryLimit: Int = SyncEngine.queryLimit
     let serialize: @Sendable (HKSample, SerializerContext) -> SampleDTO?
+    /// Follow-up queries that complete a sample (route locations, ...).
+    var enrich: (@Sendable (HealthQueries, SampleDTO, HKSample) async throws -> SampleDTO)? = nil
 
     var id: String { key }
 }
 
+/// How one quantity type's values go on the wire.
+struct QuantityPresentation: @unchecked Sendable {
+    let key: String
+    let unit: HKUnit
+    let label: String
+    let scale: Double
+}
+
+/// Every type the app syncs. Quantity, category and characteristic types
+/// come from HealthKitCatalog (generated from the SDK headers); the sample
+/// classes that need their own serializer are listed by hand below.
 enum TypeRegistry {
     enum Group {
-        static let sleep = "Sleep & Circadian"
-        static let workouts = "Workouts"
-        static let energy = "Energy & Activity"
-        static let cardio = "Cardio & Recovery"
-        static let body = "Body"
-        static let gait = "Running & Gait"
-        static let audio = "Audio Exposure"
+        static let sleep = "Sleep"
+        static let fitness = "Fitness"
+        static let heart = "Heart"
+        static let vitals = "Vital Signs"
+        static let respiratory = "Respiratory"
+        static let body = "Body Measurements"
+        static let mobility = "Mobility"
         static let nutrition = "Nutrition"
-        static let lifestyle = "Lifestyle"
+        static let hearing = "Hearing Health"
+        static let mental = "Mental Wellbeing"
+        static let symptoms = "Symptoms"
+        static let reproductive = "Reproductive Health"
+        static let vision = "Vision"
+        static let medications = "Medications"
+        static let other = "Other"
+        static let characteristics = "Characteristics"
+        static let summaries = "Activity Summaries"
     }
 
-    private static let bpm = HKUnit.count().unitDivided(by: .minute())
-    private static let mps = HKUnit.meter().unitDivided(by: .second())
+    private static let groupOrder = [
+        Group.sleep, Group.fitness, Group.summaries, Group.heart, Group.vitals, Group.respiratory,
+        Group.body, Group.mobility, Group.nutrition, Group.hearing, Group.mental, Group.symptoms,
+        Group.reproductive, Group.vision, Group.medications, Group.other, Group.characteristics,
+    ]
 
-    /// Shorthand: one registry row per quantity type. Everything defaults to
-    /// .hourly — HealthKit's cap for most quantity types anyway.
-    private static func quantity(
-        _ identifier: HKQuantityTypeIdentifier, key: String, name: String, group: String,
-        unit: HKUnit, label: String, scale: Double = 1
-    ) -> SyncedType {
-        SyncedType(
-            key: key, displayName: name, group: group,
-            sampleType: HKQuantityType(identifier), frequency: .hourly,
-            serialize: Serializers.quantity(type: key, unit: unit, unitLabel: label, scale: scale)
+    private static func group(forSection section: String) -> String {
+        switch section {
+        case "Me": Group.characteristics
+        case let known where groupOrder.contains(known): known
+        default: Group.other
+        }
+    }
+
+    /// Units Pulso v1.1 put on the wire for its original types, kept so
+    /// existing consumers don't break. Every other type uses the SDK's
+    /// canonical unit, except heart-rate-like count/s, which reads as
+    /// count/min.
+    static let legacyUnits: [String: (unit: String, label: String)] = [
+        "timeInDaylight": ("min", "min"),
+        "appleSleepingWristTemperature": ("degC", "°C"),
+        "appleSleepingBreathingDisturbances": ("count", "count"),
+        "stepCount": ("count", "count"),
+        "activeEnergyBurned": ("kcal", "kcal"),
+        "basalEnergyBurned": ("kcal", "kcal"),
+        "physicalEffort": ("kcal/(kg*hr)", "kcal/hr·kg"),
+        "appleExerciseTime": ("min", "min"),
+        "appleStandTime": ("min", "min"),
+        "flightsClimbed": ("count", "count"),
+        "distanceWalkingRunning": ("m", "m"),
+        "distanceCycling": ("m", "m"),
+        "distanceSwimming": ("m", "m"),
+        "swimmingStrokeCount": ("count", "count"),
+        "heartRate": ("count/min", "count/min"),
+        "restingHeartRate": ("count/min", "count/min"),
+        "heartRateVariabilitySDNN": ("ms", "ms"),
+        "vo2Max": ("ml/(kg*min)", "mL/(kg·min)"),
+        "heartRateRecoveryOneMinute": ("count/min", "count/min"),
+        "walkingHeartRateAverage": ("count/min", "count/min"),
+        "oxygenSaturation": ("%", "%"),
+        "respiratoryRate": ("count/min", "count/min"),
+        "bodyMass": ("kg", "kg"),
+        "bodyFatPercentage": ("%", "%"),
+        "leanBodyMass": ("kg", "kg"),
+        "bodyMassIndex": ("count", "count"),
+        "waistCircumference": ("cm", "cm"),
+        "height": ("cm", "cm"),
+        "runningPower": ("W", "W"),
+        "runningSpeed": ("m/s", "m/s"),
+        "runningStrideLength": ("m", "m"),
+        "runningVerticalOscillation": ("cm", "cm"),
+        "runningGroundContactTime": ("ms", "ms"),
+        "walkingSpeed": ("m/s", "m/s"),
+        "walkingStepLength": ("cm", "cm"),
+        "walkingAsymmetryPercentage": ("%", "%"),
+        "walkingDoubleSupportPercentage": ("%", "%"),
+        "appleWalkingSteadiness": ("%", "%"),
+        "sixMinuteWalkTestDistance": ("m", "m"),
+        "stairAscentSpeed": ("m/s", "m/s"),
+        "stairDescentSpeed": ("m/s", "m/s"),
+        "environmentalAudioExposure": ("dBASPL", "dBASPL"),
+        "headphoneAudioExposure": ("dBASPL", "dBASPL"),
+        "dietaryEnergyConsumed": ("kcal", "kcal"),
+        "dietaryProtein": ("g", "g"),
+        "dietaryCarbohydrates": ("g", "g"),
+        "dietaryFatTotal": ("g", "g"),
+        "dietaryFiber": ("g", "g"),
+        "dietarySugar": ("g", "g"),
+        "dietarySodium": ("mg", "mg"),
+        "dietaryWater": ("mL", "mL"),
+        "dietaryCaffeine": ("mg", "mg"),
+        "numberOfAlcoholicBeverages": ("count", "count"),
+    ]
+
+    private static func isAvailable(_ minimum: OperatingSystemVersion) -> Bool {
+        ProcessInfo.processInfo.isOperatingSystemAtLeast(minimum)
+    }
+
+    // MARK: - Quantities
+
+    /// HKUnit(from:) raises on a string it can't parse; a type whose unit
+    /// doesn't parse or doesn't fit the type is left out (and reported in
+    /// `skipped`) rather than crashing the app.
+    private static func makePresentation(_ entry: HealthKitCatalog.Quantity, _ type: HKQuantityType) -> QuantityPresentation? {
+        var unitString = entry.unit
+        var label = entry.unit
+        if let legacy = legacyUnits[entry.key] {
+            (unitString, label) = legacy
+        } else if unitString == "count/s" {
+            (unitString, label) = ("count/min", "count/min")
+        }
+        guard let unit = try? ObjC.catching({ HKUnit(from: unitString) }), type.is(compatibleWith: unit) else {
+            return nil
+        }
+        return QuantityPresentation(key: entry.key, unit: unit, label: label, scale: unitString == "%" ? 100 : 1)
+    }
+
+    private static let quantityPresentations: [String: QuantityPresentation] = {
+        var out: [String: QuantityPresentation] = [:]
+        for entry in HealthKitCatalog.quantities where isAvailable(entry.minimumOS) {
+            guard let type = HKObjectType.quantityType(forIdentifier: HKQuantityTypeIdentifier(rawValue: entry.identifier)),
+                  let presentation = makePresentation(entry, type) else { continue }
+            out[entry.identifier] = presentation
+        }
+        return out
+    }()
+
+    static func presentation(for type: HKQuantityType) -> QuantityPresentation? {
+        quantityPresentations[type.identifier]
+    }
+
+    private static let quantityTypes: [SyncedType] = HealthKitCatalog.quantities.compactMap { entry in
+        guard isAvailable(entry.minimumOS),
+              let type = HKObjectType.quantityType(forIdentifier: HKQuantityTypeIdentifier(rawValue: entry.identifier)),
+              let presentation = quantityPresentations[entry.identifier] else { return nil }
+        // HealthKit caps most quantity types at hourly background delivery.
+        return SyncedType(
+            key: entry.key, displayName: entry.name, group: group(forSection: entry.section),
+            sampleType: type, frequency: .hourly,
+            serialize: Serializers.quantity(
+                type: entry.key, unit: presentation.unit, unitLabel: presentation.label, scale: presentation.scale)
         )
     }
 
-    // MARK: - Groups
-    // Sleep and workouts are what this app exists for — they get .immediate
-    // background delivery. Everything else is capped at .hourly by HealthKit.
+    // MARK: - Categories
 
-    private static let sleepAndCircadian: [SyncedType] = {
+    private static let categoryTypes: [SyncedType] = HealthKitCatalog.categories.compactMap { entry in
+        guard isAvailable(entry.minimumOS),
+              let type = HKObjectType.categoryType(forIdentifier: HKCategoryTypeIdentifier(rawValue: entry.identifier))
+        else { return nil }
+        let serialize: @Sendable (HKSample, SerializerContext) -> SampleDTO? = switch entry.key {
+        case "sleepAnalysis": Serializers.sleep
+        case "sexualActivity": Serializers.sexualActivity
+        default: Serializers.category(type: entry.key, valueEnum: entry.valueEnum)
+        }
+        return SyncedType(
+            key: entry.key, displayName: entry.name, group: group(forSection: entry.section),
+            sampleType: type, frequency: .immediate, serialize: serialize
+        )
+    }
+
+    // MARK: - Sample classes with their own shape
+
+    private static let specialTypes: [SyncedType] = {
         var types: [SyncedType] = [
             SyncedType(
-                key: "sleepAnalysis", displayName: "Sleep", group: Group.sleep,
-                sampleType: HKCategoryType(.sleepAnalysis),
-                frequency: .immediate, serialize: Serializers.sleep
+                key: "workout", displayName: "Workouts", group: Group.fitness,
+                sampleType: .workoutType(), frequency: .immediate, queryLimit: 100,
+                serialize: Serializers.workout, enrich: { try await $0.enrichWorkout($1, $2) }
             ),
-            quantity(.timeInDaylight, key: "timeInDaylight", name: "Time in Daylight",
-                     group: Group.sleep, unit: .minute(), label: "min"),
-            quantity(.appleSleepingWristTemperature, key: "appleSleepingWristTemperature",
-                     name: "Sleeping Wrist Temperature", group: Group.sleep,
-                     unit: .degreeCelsius(), label: "°C"),
+            SyncedType(
+                key: "workoutRoute", displayName: "Workout Routes (GPS)", group: Group.fitness,
+                sampleType: HKSeriesType.workoutRoute(), frequency: .immediate, queryLimit: 10,
+                serialize: Serializers.plain(type: "workoutRoute", kind: "route"),
+                enrich: { try await $0.enrichRoute($1, $2) }
+            ),
+            SyncedType(
+                key: "heartbeatSeries", displayName: "Heartbeat Series (beat-to-beat)", group: Group.heart,
+                sampleType: HKSeriesType.heartbeat(), frequency: .immediate, queryLimit: 100,
+                serialize: Serializers.plain(type: "heartbeatSeries", kind: "heartbeatSeries"),
+                enrich: { try await $0.enrichHeartbeats($1, $2) }
+            ),
+            SyncedType(
+                key: "electrocardiogram", displayName: "ECG (with voltages)", group: Group.heart,
+                sampleType: HKObjectType.electrocardiogramType(), frequency: .immediate, queryLimit: 5,
+                serialize: Serializers.electrocardiogram, enrich: { try await $0.enrichElectrocardiogram($1, $2) }
+            ),
+            SyncedType(
+                key: "audiogram", displayName: "Audiograms", group: Group.hearing,
+                sampleType: HKObjectType.audiogramSampleType(), frequency: .immediate, serialize: Serializers.audiogram
+            ),
+            SyncedType(
+                key: "visionPrescription", displayName: "Vision Prescriptions", group: Group.vision,
+                sampleType: HKObjectType.visionPrescriptionType(), frequency: .immediate, access: .perObject,
+                serialize: Serializers.visionPrescription
+            ),
         ]
         if #available(iOS 18.0, *) {
-            types.append(quantity(.appleSleepingBreathingDisturbances, key: "appleSleepingBreathingDisturbances",
-                                  name: "Breathing Disturbances", group: Group.sleep,
-                                  unit: .count(), label: "count"))
+            types.append(SyncedType(
+                key: "stateOfMind", displayName: "State of Mind", group: Group.mental,
+                sampleType: HKObjectType.stateOfMindType(), frequency: .immediate, serialize: Serializers.stateOfMind
+            ))
+            for entry in HealthKitCatalog.otherIdentifiers where entry.kind == "HKScoredAssessmentTypeIdentifier" {
+                guard isAvailable(entry.minimumOS),
+                      let type = HKObjectType.scoredAssessmentType(
+                          forIdentifier: HKScoredAssessmentTypeIdentifier(rawValue: entry.identifier)) else { continue }
+                let stem = String(entry.identifier.dropFirst("HKScoredAssessmentTypeIdentifier".count))
+                types.append(SyncedType(
+                    key: entry.key, displayName: "\(entry.name) Assessment", group: Group.mental,
+                    sampleType: type, frequency: .immediate,
+                    serialize: Serializers.scoredAssessment(type: entry.key, enumPrefix: "HK\(stem)Assessment")
+                ))
+            }
         }
-        types += [
-            SyncedType(
-                key: "appleStandHour", displayName: "Stand Hours", group: Group.sleep,
-                sampleType: HKCategoryType(.appleStandHour),
-                frequency: .hourly,
-                serialize: Serializers.category(type: "appleStandHour", valueName: Serializers.standHourName)
-            ),
-            SyncedType(
-                key: "mindfulSession", displayName: "Mindful Sessions", group: Group.sleep,
-                sampleType: HKCategoryType(.mindfulSession),
-                frequency: .hourly,
-                // Value is notApplicable; the interval itself is the session.
-                serialize: Serializers.category(type: "mindfulSession", valueName: { _ in nil })
-            ),
-        ]
+        if #available(iOS 26.0, *) {
+            types.append(SyncedType(
+                key: "medicationDoseEvent", displayName: "Medication Doses", group: Group.medications,
+                sampleType: HKObjectType.medicationDoseEventType(), frequency: .immediate,
+                serialize: Serializers.medicationDoseEvent, enrich: { try await $0.enrichDoseEvent($1, $2) }
+            ))
+        }
+        for entry in HealthKitCatalog.otherIdentifiers where entry.kind == "HKCorrelationTypeIdentifier" {
+            guard isAvailable(entry.minimumOS),
+                  let type = HKObjectType.correlationType(forIdentifier: HKCorrelationTypeIdentifier(rawValue: entry.identifier))
+            else { continue }
+            types.append(SyncedType(
+                key: entry.key, displayName: "\(entry.name) (correlation)", group: group(forSection: entry.section),
+                sampleType: type, frequency: .immediate, access: .viaComponents,
+                serialize: Serializers.correlation(type: entry.key)
+            ))
+        }
         return types
     }()
 
-    private static let workouts: [SyncedType] = [
-        SyncedType(
-            key: "workout", displayName: "Workouts", group: Group.workouts,
-            sampleType: HKObjectType.workoutType(),
-            frequency: .immediate, serialize: Serializers.workout
-        ),
-    ]
-
-    private static let energyAndActivity: [SyncedType] = [
-        quantity(.stepCount, key: "stepCount", name: "Steps",
-                 group: Group.energy, unit: .count(), label: "count"),
-        quantity(.activeEnergyBurned, key: "activeEnergyBurned", name: "Active Energy",
-                 group: Group.energy, unit: .kilocalorie(), label: "kcal"),
-        quantity(.basalEnergyBurned, key: "basalEnergyBurned", name: "Basal Energy",
-                 group: Group.energy, unit: .kilocalorie(), label: "kcal"),
-        quantity(.physicalEffort, key: "physicalEffort", name: "Physical Effort",
-                 group: Group.energy,
-                 unit: .kilocalorie().unitDivided(by: .hour().unitMultiplied(by: .gramUnit(with: .kilo))),
-                 label: "kcal/hr·kg"),
-        quantity(.appleExerciseTime, key: "appleExerciseTime", name: "Exercise Time",
-                 group: Group.energy, unit: .minute(), label: "min"),
-        quantity(.appleStandTime, key: "appleStandTime", name: "Stand Time",
-                 group: Group.energy, unit: .minute(), label: "min"),
-        quantity(.flightsClimbed, key: "flightsClimbed", name: "Flights Climbed",
-                 group: Group.energy, unit: .count(), label: "count"),
-        quantity(.distanceWalkingRunning, key: "distanceWalkingRunning", name: "Walking + Running Distance",
-                 group: Group.energy, unit: .meter(), label: "m"),
-        quantity(.distanceCycling, key: "distanceCycling", name: "Cycling Distance",
-                 group: Group.energy, unit: .meter(), label: "m"),
-        quantity(.distanceSwimming, key: "distanceSwimming", name: "Swimming Distance",
-                 group: Group.energy, unit: .meter(), label: "m"),
-        quantity(.swimmingStrokeCount, key: "swimmingStrokeCount", name: "Swimming Strokes",
-                 group: Group.energy, unit: .count(), label: "count"),
-    ]
-
-    private static let cardioAndRecovery: [SyncedType] = [
-        quantity(.heartRate, key: "heartRate", name: "Heart Rate",
-                 group: Group.cardio, unit: bpm, label: "count/min"),
-        quantity(.restingHeartRate, key: "restingHeartRate", name: "Resting Heart Rate",
-                 group: Group.cardio, unit: bpm, label: "count/min"),
-        quantity(.heartRateVariabilitySDNN, key: "heartRateVariabilitySDNN", name: "HRV (SDNN)",
-                 group: Group.cardio, unit: .secondUnit(with: .milli), label: "ms"),
-        quantity(.vo2Max, key: "vo2Max", name: "VO₂ Max",
-                 group: Group.cardio,
-                 unit: .literUnit(with: .milli)
-                     .unitDivided(by: .gramUnit(with: .kilo).unitMultiplied(by: .minute())),
-                 label: "mL/(kg·min)"),
-        quantity(.heartRateRecoveryOneMinute, key: "heartRateRecoveryOneMinute", name: "Heart Rate Recovery",
-                 group: Group.cardio, unit: bpm, label: "count/min"),
-        quantity(.walkingHeartRateAverage, key: "walkingHeartRateAverage", name: "Walking Heart Rate Avg",
-                 group: Group.cardio, unit: bpm, label: "count/min"),
-        quantity(.oxygenSaturation, key: "oxygenSaturation", name: "Blood Oxygen",
-                 group: Group.cardio, unit: .percent(), label: "%", scale: 100),
-        quantity(.respiratoryRate, key: "respiratoryRate", name: "Respiratory Rate",
-                 group: Group.cardio, unit: bpm, label: "count/min"),
-    ]
-
-    private static let body: [SyncedType] = [
-        quantity(.bodyMass, key: "bodyMass", name: "Body Mass",
-                 group: Group.body, unit: .gramUnit(with: .kilo), label: "kg"),
-        quantity(.bodyFatPercentage, key: "bodyFatPercentage", name: "Body Fat",
-                 group: Group.body, unit: .percent(), label: "%", scale: 100),
-        quantity(.leanBodyMass, key: "leanBodyMass", name: "Lean Body Mass",
-                 group: Group.body, unit: .gramUnit(with: .kilo), label: "kg"),
-        quantity(.bodyMassIndex, key: "bodyMassIndex", name: "Body Mass Index",
-                 group: Group.body, unit: .count(), label: "count"),
-        quantity(.waistCircumference, key: "waistCircumference", name: "Waist Circumference",
-                 group: Group.body, unit: .meterUnit(with: .centi), label: "cm"),
-        quantity(.height, key: "height", name: "Height",
-                 group: Group.body, unit: .meterUnit(with: .centi), label: "cm"),
-    ]
-
-    private static let runningAndGait: [SyncedType] = [
-        quantity(.runningPower, key: "runningPower", name: "Running Power",
-                 group: Group.gait, unit: .watt(), label: "W"),
-        quantity(.runningSpeed, key: "runningSpeed", name: "Running Speed",
-                 group: Group.gait, unit: mps, label: "m/s"),
-        quantity(.runningStrideLength, key: "runningStrideLength", name: "Running Stride Length",
-                 group: Group.gait, unit: .meter(), label: "m"),
-        quantity(.runningVerticalOscillation, key: "runningVerticalOscillation", name: "Vertical Oscillation",
-                 group: Group.gait, unit: .meterUnit(with: .centi), label: "cm"),
-        quantity(.runningGroundContactTime, key: "runningGroundContactTime", name: "Ground Contact Time",
-                 group: Group.gait, unit: .secondUnit(with: .milli), label: "ms"),
-        quantity(.walkingSpeed, key: "walkingSpeed", name: "Walking Speed",
-                 group: Group.gait, unit: mps, label: "m/s"),
-        quantity(.walkingStepLength, key: "walkingStepLength", name: "Walking Step Length",
-                 group: Group.gait, unit: .meterUnit(with: .centi), label: "cm"),
-        quantity(.walkingAsymmetryPercentage, key: "walkingAsymmetryPercentage", name: "Walking Asymmetry",
-                 group: Group.gait, unit: .percent(), label: "%", scale: 100),
-        quantity(.walkingDoubleSupportPercentage, key: "walkingDoubleSupportPercentage", name: "Double Support",
-                 group: Group.gait, unit: .percent(), label: "%", scale: 100),
-        quantity(.appleWalkingSteadiness, key: "appleWalkingSteadiness", name: "Walking Steadiness",
-                 group: Group.gait, unit: .percent(), label: "%", scale: 100),
-        quantity(.sixMinuteWalkTestDistance, key: "sixMinuteWalkTestDistance", name: "Six-Minute Walk",
-                 group: Group.gait, unit: .meter(), label: "m"),
-        quantity(.stairAscentSpeed, key: "stairAscentSpeed", name: "Stair Ascent Speed",
-                 group: Group.gait, unit: mps, label: "m/s"),
-        quantity(.stairDescentSpeed, key: "stairDescentSpeed", name: "Stair Descent Speed",
-                 group: Group.gait, unit: mps, label: "m/s"),
-    ]
-
-    private static let audioExposure: [SyncedType] = [
-        quantity(.environmentalAudioExposure, key: "environmentalAudioExposure", name: "Environmental Sound",
-                 group: Group.audio, unit: .decibelAWeightedSoundPressureLevel(), label: "dBASPL"),
-        quantity(.headphoneAudioExposure, key: "headphoneAudioExposure", name: "Headphone Audio",
-                 group: Group.audio, unit: .decibelAWeightedSoundPressureLevel(), label: "dBASPL"),
-    ]
-
-    private static let nutrition: [SyncedType] = [
-        quantity(.dietaryEnergyConsumed, key: "dietaryEnergyConsumed", name: "Dietary Energy",
-                 group: Group.nutrition, unit: .kilocalorie(), label: "kcal"),
-        quantity(.dietaryProtein, key: "dietaryProtein", name: "Protein",
-                 group: Group.nutrition, unit: .gram(), label: "g"),
-        quantity(.dietaryCarbohydrates, key: "dietaryCarbohydrates", name: "Carbohydrates",
-                 group: Group.nutrition, unit: .gram(), label: "g"),
-        quantity(.dietaryFatTotal, key: "dietaryFatTotal", name: "Total Fat",
-                 group: Group.nutrition, unit: .gram(), label: "g"),
-        quantity(.dietaryFiber, key: "dietaryFiber", name: "Fiber",
-                 group: Group.nutrition, unit: .gram(), label: "g"),
-        quantity(.dietarySugar, key: "dietarySugar", name: "Sugar",
-                 group: Group.nutrition, unit: .gram(), label: "g"),
-        quantity(.dietarySodium, key: "dietarySodium", name: "Sodium",
-                 group: Group.nutrition, unit: .gramUnit(with: .milli), label: "mg"),
-        quantity(.dietaryWater, key: "dietaryWater", name: "Water",
-                 group: Group.nutrition, unit: .literUnit(with: .milli), label: "mL"),
-        quantity(.dietaryCaffeine, key: "dietaryCaffeine", name: "Caffeine",
-                 group: Group.nutrition, unit: .gramUnit(with: .milli), label: "mg"),
-        quantity(.numberOfAlcoholicBeverages, key: "numberOfAlcoholicBeverages", name: "Alcoholic Beverages",
-                 group: Group.nutrition, unit: .count(), label: "count"),
-    ]
-
-    private static let lifestyle: [SyncedType] = [
-        SyncedType(
-            key: "sexualActivity", displayName: "Sexual Activity", group: Group.lifestyle,
-            sampleType: HKCategoryType(.sexualActivity),
-            frequency: .hourly,
-            serialize: Serializers.sexualActivity
-        ),
-    ]
-
     // MARK: - Public surface
 
-    static let all: [SyncedType] =
-        sleepAndCircadian + workouts + energyAndActivity + cardioAndRecovery
-            + body + runningAndGait + audioExposure + nutrition + lifestyle
-
-    /// Group names in registry order, for UI sections.
-    static let groups: [String] = {
-        var seen = Set<String>()
-        return all.compactMap { seen.insert($0.group).inserted ? $0.group : nil }
+    static let all: [SyncedType] = {
+        let combined = specialTypes + categoryTypes + quantityTypes
+        let rank = Dictionary(uniqueKeysWithValues: groupOrder.enumerated().map { ($1, $0) })
+        // Stable sort: registry order within a group.
+        return combined.enumerated().sorted { a, b in
+            let ra = rank[a.element.group] ?? groupOrder.count
+            let rb = rank[b.element.group] ?? groupOrder.count
+            return ra != rb ? ra < rb : a.offset < b.offset
+        }.map(\.element)
     }()
 
+    static var snapshots: [SnapshotSource] { Snapshots.all }
+
+    /// Group names in display order, for UI sections.
+    static let groups: [String] = {
+        let present = Set(all.map(\.group) + Snapshots.all.map(\.group))
+        return groupOrder.filter(present.contains)
+    }()
+
+    private static let byKey: [String: SyncedType] = Dictionary(all.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+    private static let byIdentifier: [String: SyncedType] = Dictionary(
+        all.map { ($0.sampleType.identifier, $0) }, uniquingKeysWith: { first, _ in first })
+
     static func type(for key: String) -> SyncedType? {
-        all.first { $0.key == key }
+        byKey[key]
     }
 
+    static func type(for sampleType: HKSampleType) -> SyncedType? {
+        byIdentifier[sampleType.identifier]
+    }
+
+    /// Everything requestAuthorization should be asked to read, before
+    /// HealthAuthorization drops what this OS refuses.
     static var readTypes: Set<HKObjectType> {
-        Set(all.map { $0.sampleType as HKObjectType })
+        var types = Set(all.filter { $0.access == .read }.map { $0.sampleType as HKObjectType })
+        for source in Snapshots.all {
+            types.formUnion(source.readTypes)
+        }
+        return types
+    }
+
+    /// Types granted object by object from a user tap.
+    static var perObjectTypes: [(key: String, displayName: String, type: HKObjectType)] {
+        var out = all.filter { $0.access == .perObject }.map { ($0.key, $0.displayName, $0.sampleType as HKObjectType) }
+        for source in Snapshots.all {
+            if let type = source.perObjectType {
+                out.append((source.key, source.displayName, type))
+            }
+        }
+        return out
+    }
+
+    /// SDK identifiers this build declares but doesn't sync, with the reason,
+    /// for the coverage list in Settings and the docs.
+    static var skipped: [(identifier: String, reason: String)] {
+        var out: [(String, String)] = []
+        for entry in HealthKitCatalog.quantities where byKey[entry.key] == nil {
+            out.append((entry.identifier, isAvailable(entry.minimumOS) ? "unit \(entry.unit) unusable" : "needs a newer iOS"))
+        }
+        for entry in HealthKitCatalog.categories where byKey[entry.key] == nil {
+            out.append((entry.identifier, "needs a newer iOS"))
+        }
+        for entry in HealthKitCatalog.otherIdentifiers where byKey[entry.key] == nil {
+            switch entry.kind {
+            case "HKDocumentTypeIdentifier":
+                out.append((entry.identifier, "clinical document: each document needs its own approval sheet"))
+            default:
+                out.append((entry.identifier, "needs a newer iOS"))
+            }
+        }
+        return out
     }
 }

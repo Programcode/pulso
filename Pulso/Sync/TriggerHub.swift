@@ -61,42 +61,54 @@ final class TriggerHub {
 
     // MARK: - Observer queries
 
-    /// (Re)registers observer queries and background delivery for the
-    /// currently enabled types. Called at launch and when toggles change.
+    /// (Re)registers background delivery and one observer query covering
+    /// every enabled type. Called at launch and when toggles change.
     func startObservers() async {
         stopObservers()
+        let refused = HealthAuthorization.lastRejected()
+        var descriptors: [HKQueryDescriptor] = []
+        var unavailable: [String] = []
         for type in TypeRegistry.all {
-            guard AppSettings.currentEnabled(type.key) else {
+            guard AppSettings.currentEnabled(type.key), !refused.contains(type.sampleType.identifier) else {
                 try? await healthStore.disableBackgroundDelivery(for: type.sampleType)
                 continue
             }
+            // Correlations change only through their member types, which
+            // have observers of their own; full passes pick them up.
+            guard type.access != .viaComponents else { continue }
             do {
                 try await healthStore.enableBackgroundDelivery(for: type.sampleType, frequency: type.frequency)
             } catch {
-                await log.warn("background delivery unavailable for \(type.key): \(error.localizedDescription)")
+                unavailable.append(type.key)
             }
-            let key = type.key
-            let query = HKObserverQuery(sampleType: type.sampleType, predicate: nil) { [weak self] _, completionHandler, error in
-                if error != nil {
+            descriptors.append(HKQueryDescriptor(sampleType: type.sampleType, predicate: nil))
+        }
+        if !unavailable.isEmpty {
+            await log.warn("background delivery unavailable for \(unavailable.count) type(s): \(unavailable.prefix(15).joined(separator: ", "))")
+        }
+        guard !descriptors.isEmpty else { return }
+        let query = HKObserverQuery(queryDescriptors: descriptors) { [weak self] _, changed, completionHandler, error in
+            if error != nil {
+                completionHandler()
+                return
+            }
+            let keys = Set((changed ?? []).compactMap { TypeRegistry.type(for: $0)?.key })
+            Task { @MainActor [weak self] in
+                // HealthKit throttles future deliveries if the completion
+                // handler is called before the work is done — so it is
+                // called after the sync pass, from a background task with
+                // a watchdog in case the server hangs.
+                guard let self else {
                     completionHandler()
                     return
                 }
-                Task { @MainActor [weak self] in
-                    // HealthKit throttles future deliveries if the completion
-                    // handler is called before the work is done — so it is
-                    // called after the sync pass, from a background task with
-                    // a watchdog in case the server hangs.
-                    guard let self else {
-                        completionHandler()
-                        return
-                    }
-                    await self.observerFired(key)
-                    completionHandler()
-                }
+                await self.observerFired(keys)
+                completionHandler()
             }
-            healthStore.execute(query)
-            observerQueries.append(query)
         }
+        healthStore.execute(query)
+        observerQueries.append(query)
+        await log.info("observing \(descriptors.count) type(s) for background delivery")
     }
 
     func stopObservers() {
@@ -104,24 +116,27 @@ final class TriggerHub {
         observerQueries.removeAll()
     }
 
-    private func observerFired(_ key: String) async {
+    private func observerFired(_ keys: Set<String>) async {
         let backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "pulso-observer-sync")
         defer {
             if backgroundTask != .invalid {
                 UIApplication.shared.endBackgroundTask(backgroundTask)
             }
         }
+        let label = keys.count == 1 ? keys.first! : "\(keys.count) types"
         if UIApplication.shared.isProtectedDataAvailable {
-            await log.info("observer wake: \(key)")
+            await log.info("observer wake: \(label)")
         } else {
             // F2: health data is unreadable while locked. The attempt is
             // still made — it fails cleanly without moving anchors — and the
             // next unlock-time trigger catches up.
-            await log.info("observer wake (\(key)) while device locked — will catch up after unlock")
+            await log.info("observer wake (\(label)) while device locked — will catch up after unlock")
         }
         let engine = engine
+        // An empty set (HealthKit didn't say which types) means a full pass.
+        let only = keys.isEmpty ? nil : keys
         await withTimeout(seconds: 25) {
-            await engine.requestSync(.observer(key))
+            await engine.requestSync(.observer(label), only: only)
         }
     }
 }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import HealthKit
 
@@ -53,6 +54,7 @@ actor SyncEngine {
     static let queryLimit = 5000
 
     private let healthStore: HKHealthStore
+    private let queries: HealthQueries
     private let anchors: AnchorStore
     private let outbox: Outbox
     private let log: LogStore
@@ -60,6 +62,9 @@ actor SyncEngine {
     /// GET /latest from the configured server; nil when unavailable.
     private let latestHints: @Sendable () async -> [String: String]?
     private var anchorCache: [String: HKQueryAnchor] = [:]
+    /// Snapshot fingerprints already queued, leading the delivered ones the
+    /// same way anchorCache leads the persisted anchors.
+    private var snapshotCache: [String: [String: String]] = [:]
     private var chain: Task<Void, Never>?
     /// Types whose query threw last time (typically authorization not yet
     /// granted for a newly added type). They must not hold the catch-up
@@ -77,6 +82,7 @@ actor SyncEngine {
         latestHints: @escaping @Sendable () async -> [String: String]? = { nil }
     ) {
         self.healthStore = healthStore
+        queries = HealthQueries(store: healthStore)
         self.anchors = anchors
         self.outbox = outbox
         self.log = log
@@ -86,23 +92,29 @@ actor SyncEngine {
 
     /// Every trigger funnels here. Passes are serialized; each caller returns
     /// after its own pass (and the outbox drain it triggers) completes.
-    func requestSync(_ reason: SyncReason) async {
+    /// `only` limits a pass to those type keys (observer wakes name the
+    /// types that changed); nil means every enabled type and snapshot.
+    func requestSync(_ reason: SyncReason, only keys: Set<String>? = nil) async {
         let previous = chain
         let task = Task {
             await previous?.value
-            await self.performSync(reason)
+            await self.performSync(reason, only: keys)
         }
         chain = task
         await task.value
     }
 
-    private func performSync(_ reason: SyncReason) async {
+    private func performSync(_ reason: SyncReason, only keys: Set<String>?) async {
         guard AppSettings.currentTarget() != nil else {
             await log.info("sync skipped (\(reason)): no server configured")
             return
         }
         await status.setSyncing(true)
-        let enabled = AppSettings.currentEnabledTypes()
+        // Types this OS refused at authorization would only fail their query.
+        let refused = HealthAuthorization.lastRejected()
+        let enabled = AppSettings.currentEnabledTypes().filter {
+            !refused.contains($0.sampleType.identifier) && (keys?.contains($0.key) ?? true)
+        }
 
         // A user-visible pass may follow a permission grant — retry types
         // that were failing. Background wakes keep them excluded.
@@ -157,7 +169,19 @@ actor SyncEngine {
                 await log.error("\(type.key): \(error.localizedDescription)")
             }
         }
-        if reimporting && !anyFailed {
+        // Snapshots have no observer of their own; they ride along on every
+        // full pass.
+        if keys == nil {
+            for source in AppSettings.currentEnabledSnapshots() {
+                do {
+                    queued += try await syncSnapshot(source)
+                } catch {
+                    anyFailed = true
+                    await log.error("\(source.key): \(error.localizedDescription)")
+                }
+            }
+        }
+        if reimporting && !anyFailed && keys == nil {
             UserDefaults.standard.set(false, forKey: SettingsKeys.reimportPending)
             await log.info("full re-import pass completed for all enabled types")
         }
@@ -197,7 +221,7 @@ actor SyncEngine {
             let descriptor = HKAnchoredObjectQueryDescriptor(
                 predicates: [.sample(type: type.sampleType, predicate: datePredicate)],
                 anchor: anchor,
-                limit: Self.queryLimit
+                limit: type.queryLimit
             )
             let result = try await descriptor.result(for: healthStore)
             let added = result.addedSamples
@@ -215,7 +239,14 @@ actor SyncEngine {
                 return queued
             }
 
-            let dtos = added.compactMap { type.serialize($0, .live) }
+            var dtos: [SampleDTO] = []
+            dtos.reserveCapacity(added.count)
+            for sample in added {
+                guard let dto = type.serialize(sample, .live) else { continue }
+                // A failed enrich query throws out of the pass: the anchor
+                // stays put and these samples are read again next time.
+                dtos.append(try await type.enrich?(queries, dto, sample) ?? dto)
+            }
             if dtos.count < added.count {
                 await log.warn("\(type.key): \(added.count - dtos.count) sample(s) not serializable — skipped")
             }
@@ -236,10 +267,55 @@ actor SyncEngine {
             } else {
                 await log.info("\(type.key): queued \(dtos.count) sample(s)")
             }
-            if added.count < Self.queryLimit && deleted.count < Self.queryLimit {
+            if added.count < type.queryLimit && deleted.count < type.queryLimit {
                 return queued
             }
         }
+    }
+
+    /// Reads a snapshot source and queues the records whose content changed
+    /// since the last delivered read. The new fingerprints ride in the
+    /// batch's anchor slot, so they are persisted only once the server ACKs.
+    private func syncSnapshot(_ source: SnapshotSource) async throws -> Int {
+        let stored = anchors.loadRaw(source.key)
+        let delivered = snapshotCache[source.key]
+            ?? stored.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
+        let records = try await source.read(queries, .live, delivered == nil)
+        var state = delivered ?? [:]
+        var changed: [SampleDTO] = []
+        for record in records {
+            let fingerprint = Self.fingerprint(record)
+            if state[record.uuid] != fingerprint {
+                state[record.uuid] = fingerprint
+                changed.append(record)
+            }
+        }
+        await status.recordChecked(source.key)
+        let encoded = try JSONEncoder().encode(state)
+        guard !changed.isEmpty else {
+            if stored == nil { anchors.saveRaw(encoded, for: source.key) }
+            return 0
+        }
+        try await outbox.enqueue(typeKey: source.key, elements: changed.map(BatchElement.sample), anchor: encoded)
+        snapshotCache[source.key] = state
+        await log.info("\(source.key): queued \(changed.count) changed record(s)")
+        return changed.count
+    }
+
+    /// Content identity of a snapshot record; timestamps are left out
+    /// because characteristics and medications are stamped at read time.
+    static func fingerprint(_ record: SampleDTO) -> String {
+        let content: [String: JSONValue] = [
+            "value": record.value.map { value -> JSONValue in
+                switch value {
+                case .string(let s): .string(s)
+                case .number(let n): .number(n)
+                }
+            } ?? .null,
+            "details": .object(record.details ?? [:]),
+        ]
+        let data = (try? Wire.bodyEncoder().encode(content)) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     /// The SDK has flip-flopped on the optionality of `newAnchor`; funneling
@@ -250,6 +326,7 @@ actor SyncEngine {
 
     func resetAllAnchors() {
         anchorCache = [:]
+        snapshotCache = [:]
         authBlocked = []
         latestFetch = nil
     }

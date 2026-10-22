@@ -35,9 +35,14 @@ jobs:
 
   app:
     name: App build & unit tests
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Select the newest stable Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | grep -viE 'beta|_rc|release_candidate' | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
       - name: Pick a simulator
         id: sim
         run: |
@@ -49,10 +54,30 @@ jobs:
           print(sorted(names)[-1])')
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "Using simulator: $NAME"
+      # Signed ad-hoc ("Sign to Run Locally") rather than unsigned, so the
+      # test host carries the HealthKit entitlement and the read-set probe
+      # exercises HealthKit's real validation.
       - name: Build and test
+        env:
+          SIMULATOR: ${{ steps.sim.outputs.name }}
         run: |
+          status=0
           xcodebuild test \
             -project Pulso.xcodeproj \
             -scheme Pulso \
-            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" \
-            CODE_SIGNING_ALLOWED=NO
+            -destination "platform=iOS Simulator,name=$SIMULATOR" \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM= \
+            > test.log 2>&1 || status=$?
+          grep -E '(error:|PULSO-|Test Case .* failed|Executed [0-9]+ tests|\*\* TEST)' test.log | head -200 || true
+          if [ "$status" -ne 0 ]; then
+            tail -80 test.log
+            exit "$status"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-test-log
+          path: test.log
+          if-no-files-found: ignore
