@@ -7,8 +7,16 @@ import Foundation
 actor OutboxHub {
     enum EnqueueError: LocalizedError {
         case noDestination
+        /// The receiving destinations changed since the catch-up hints were
+        /// fetched; the batch would skip history a new destination needs.
+        case destinationsChanged
 
-        var errorDescription: String? { "no enabled destination is configured" }
+        var errorDescription: String? {
+            switch self {
+            case .noDestination: "no enabled destination is configured"
+            case .destinationsChanged: "destinations changed during catch-up"
+            }
+        }
     }
 
     private let root: URL
@@ -74,9 +82,15 @@ actor OutboxHub {
     /// Writes the elements to every enabled destination's queue. Throws if
     /// none can deliver or a write fails, in which case the caller must not
     /// advance its anchor.
-    func enqueue(typeKey: String, elements: [BatchElement]) async throws {
+    /// With `catchUpKey`, refuses unless the destinations written to are
+    /// exactly the set the catch-up hints came from (checked against the
+    /// same list it writes to).
+    func enqueue(typeKey: String, elements: [BatchElement], catchUpKey: String? = nil) async throws {
         let targets = active
         guard hasActiveDestination() else { throw EnqueueError.noDestination }
+        if let catchUpKey, AppSettings.catchUpKey(targets.map(\.destination)) != catchUpKey {
+            throw EnqueueError.destinationsChanged
+        }
         for target in targets {
             try await target.outbox.enqueue(typeKey: typeKey, elements: elements, anchor: nil)
         }

@@ -180,9 +180,11 @@ actor SyncEngine {
         // an interleaved or resumed pass would otherwise catch-up against
         // the fully-populated server and defeat the re-import.
         var cutoffs: [String: Date] = [:]
+        var catchUpKey: String?
         let reimporting = UserDefaults.standard.bool(forKey: SettingsKeys.reimportPending)
         if !reimporting && !missing.isEmpty {
-            if let latest = await cachedLatestHints() {
+            if let (latest, key) = await cachedLatestHints() {
+                catchUpKey = key
                 let parsed = CatchUp.cutoffs(fromLatest: latest)
                 if parsed.count < latest.count {
                     await log.warn("server /latest: \(latest.count - parsed.count) unparseable timestamp(s) ignored")
@@ -198,7 +200,7 @@ actor SyncEngine {
         var anyFailed = false
         for type in enabled {
             do {
-                queued += try await sync(type, anchor: resolvedAnchors[type.key], cutoffs: cutoffs)
+                queued += try await sync(type, anchor: resolvedAnchors[type.key], cutoffs: cutoffs, catchUpKey: catchUpKey)
             } catch {
                 anyFailed = true
                 authBlocked.insert(type.key)
@@ -334,21 +336,23 @@ actor SyncEngine {
         return true
     }
 
-    private func cachedLatestHints() async -> [String: String]? {
-        let destinations = AppSettings.receivingDestinations()
-            .map { "\($0.id.uuidString)|\($0.latestURL?.absoluteString ?? "-")" }
-            .sorted()
-            .joined(separator: ",")
+    /// Hints plus the key of the destination set they belong to. A set that
+    /// changed while the request was in flight discards the answer.
+    private func cachedLatestHints() async -> (hints: [String: String], key: String)? {
+        let destinations = AppSettings.catchUpKey(AppSettings.receivingDestinations())
         if let cached = latestFetch, cached.destinations == destinations,
            Date().timeIntervalSince(cached.at) < Self.latestCacheInterval {
-            return cached.hints
+            return cached.hints.map { ($0, destinations) }
         }
         let hints = await latestHints()
+        guard AppSettings.catchUpKey(AppSettings.receivingDestinations()) == destinations else { return nil }
         latestFetch = (Date(), destinations, hints)
-        return hints
+        return hints.map { ($0, destinations) }
     }
 
-    private func sync(_ type: SyncedType, anchor resolvedAnchor: HKQueryAnchor?, cutoffs: [String: Date]) async throws -> Int {
+    private func sync(
+        _ type: SyncedType, anchor resolvedAnchor: HKQueryAnchor?, cutoffs: [String: Date], catchUpKey: String?
+    ) async throws -> Int {
         var anchor = resolvedAnchor
         // Date-bounding a nil-anchor query skips the historical read while
         // still returning a store-wide anchor, so later incremental syncs
@@ -372,7 +376,13 @@ actor SyncEngine {
 
             if added.isEmpty && deleted.isEmpty {
                 // Nothing new — the anchor covers no undelivered samples, so
-                // persisting it immediately is safe.
+                // persisting it immediately is safe, unless it ends a
+                // date-bounded first read whose destination set has changed.
+                if datePredicate != nil, let catchUpKey,
+                   AppSettings.catchUpKey(AppSettings.receivingDestinations()) != catchUpKey {
+                    latestFetch = nil
+                    return queued
+                }
                 if let newAnchor {
                     anchorCache[type.key] = newAnchor
                     anchors.save(newAnchor, for: type.key)
@@ -396,7 +406,17 @@ actor SyncEngine {
             if !deleted.isEmpty {
                 elements.append(.tombstone(deleted))
             }
-            try await outbox.enqueue(typeKey: type.key, elements: elements)
+            do {
+                // A date-bounded first read is only right for the destinations
+                // the hints came from.
+                try await outbox.enqueue(
+                    typeKey: type.key, elements: elements, catchUpKey: datePredicate == nil ? nil : catchUpKey
+                )
+            } catch OutboxHub.EnqueueError.destinationsChanged {
+                latestFetch = nil
+                await log.info("\(type.key): destinations changed during catch-up — will re-check on the next pass")
+                return queued
+            }
             if let newAnchor {
                 anchors.save(newAnchor, for: type.key)
                 anchorCache[type.key] = newAnchor

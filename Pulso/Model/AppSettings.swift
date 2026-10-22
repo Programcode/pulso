@@ -117,6 +117,14 @@ final class AppSettings {
         currentDestinations().filter(\.receivesBatches)
     }
 
+    /// Identity of a set of receiving destinations for catch-up: hints from
+    /// /latest are only valid for the exact set they were gathered from.
+    nonisolated static func catchUpKey(_ destinations: [Destination]) -> String {
+        destinations.map { "\($0.id.uuidString)|\($0.latestURL?.absoluteString ?? "-")" }
+            .sorted()
+            .joined(separator: ",")
+    }
+
     func isEnabled(_ key: String) -> Bool { enabled[key] ?? true }
     func setEnabled(_ key: String, _ value: Bool) { enabled[key] = value }
 

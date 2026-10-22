@@ -211,4 +211,29 @@ final class DestinationTests: XCTestCase {
         XCTAssertEqual(AppSettings.currentDestinations().first?.wasConfigured, true)
         XCTAssertEqual(AppSettings.receivingDestinations().map(\.id), [destination.id])
     }
+
+    /// A batch read with catch-up hints may only go to the destination set
+    /// the hints came from; a destination added meanwhile needs the history.
+    func testCatchUpBatchIsRefusedWhenTheDestinationSetChanged() async throws {
+        let a = Destination(name: "a", kind: .file)
+        let b = Destination(name: "b", kind: .file)
+        var destinations = [a]
+        let lock = NSLock()
+        let hub = OutboxHub(
+            root: base, log: LogStore(directory: base), status: AppStatus(),
+            destinations: { lock.lock(); defer { lock.unlock() }; return destinations },
+            transport: { _ in nil }
+        )
+        let key = AppSettings.catchUpKey([a])
+        try await hub.enqueue(typeKey: "heartRate", elements: [sample("1")], catchUpKey: key)
+        XCTAssertEqual(pendingFiles(a.id).count, 1)
+
+        lock.lock(); destinations = [a, b]; lock.unlock()
+        do {
+            try await hub.enqueue(typeKey: "heartRate", elements: [sample("2")], catchUpKey: key)
+            XCTFail("must refuse: b joined after the hints were fetched")
+        } catch OutboxHub.EnqueueError.destinationsChanged {}
+        XCTAssertEqual(pendingFiles(a.id).count, 1, "nothing written on refusal")
+        XCTAssertEqual(pendingFiles(b.id), [])
+    }
 }
