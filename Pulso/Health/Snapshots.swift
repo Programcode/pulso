@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import HealthKit
 
@@ -12,6 +13,9 @@ struct SnapshotSource: Identifiable {
     let readTypes: Set<HKObjectType>
     /// Types needing a per-object grant (a user tap) instead of the read set.
     let perObjectType: HKObjectType?
+    /// True when a read returns every record that exists, so a record
+    /// missing from it was deleted. False for windowed reads.
+    let complete: Bool
     /// `delivered` holds the record keys (and fingerprints) already queued;
     /// nil when nothing was, so the read should cover all history.
     let read: @Sendable (_ queries: HealthQueries, _ context: SerializerContext, _ delivered: [String: String]?) async throws -> [SampleDTO]
@@ -54,7 +58,8 @@ enum Snapshots {
             guard ProcessInfo.processInfo.isOperatingSystemAtLeast(entry.minimumOS) else { return nil }
             return HKObjectType.characteristicType(forIdentifier: HKCharacteristicTypeIdentifier(rawValue: entry.identifier))
         }),
-        perObjectType: nil
+        perObjectType: nil,
+        complete: true
     ) { queries, context, _ in
         let store = queries.store
         var details: [String: JSONValue] = [:]
@@ -92,7 +97,8 @@ enum Snapshots {
         displayName: "Activity Rings (daily summaries)",
         group: TypeRegistry.Group.summaries,
         readTypes: [HKObjectType.activitySummaryType()],
-        perObjectType: nil
+        perObjectType: nil,
+        complete: false
     ) { queries, context, delivered in
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = context.defaultTimeZone()
@@ -159,7 +165,8 @@ enum Snapshots {
         displayName: "Medication List",
         group: TypeRegistry.Group.medications,
         readTypes: [],
-        perObjectType: HKObjectType.userAnnotatedMedicationType()
+        perObjectType: HKObjectType.userAnnotatedMedicationType(),
+        complete: true
     ) { queries, context, _ in
         let now = Date()
         return try await queries.userAnnotatedMedications().map { annotated in
@@ -184,4 +191,88 @@ enum Snapshots {
             )
         }
     } }
+}
+
+/// What has been queued for one snapshot source. Every change to a record
+/// is sent as a new version with a uuid that is never reused (record key,
+/// a random epoch for this state, a version counter), and the version it
+/// replaces is tombstoned. Receivers that keep the first copy of a uuid and
+/// receivers that upsert both end up with only the latest version.
+struct SnapshotState: Codable, Equatable, Sendable {
+    struct Entry: Codable, Equatable, Sendable {
+        /// nil once the record was deleted (its last version tombstoned).
+        var fingerprint: String?
+        var version: Int
+    }
+
+    var epoch: String
+    var entries: [String: Entry] = [:]
+
+    static func fresh() -> SnapshotState {
+        SnapshotState(epoch: String(UUID().uuidString.prefix(8)).lowercased())
+    }
+
+    /// Fingerprints of the records that currently exist, by record key.
+    var fingerprints: [String: String] {
+        entries.compactMapValues(\.fingerprint)
+    }
+
+    func uuid(_ key: String, version: Int) -> String {
+        "\(key)-\(epoch)-v\(version)"
+    }
+
+    /// Takes one read (records keyed by their `uuid`) and returns the new
+    /// versions to send and the uuids of the versions they replace or that
+    /// were deleted. An empty read never deletes anything: HealthKit
+    /// returns nothing, not an error, when access is missing.
+    mutating func apply(_ records: [SampleDTO], complete: Bool) -> (send: [SampleDTO], superseded: [String]) {
+        var send: [SampleDTO] = []
+        var superseded: [String] = []
+        for record in records {
+            let key = record.uuid
+            let fingerprint = Self.fingerprint(record)
+            let previous = entries[key]
+            guard previous?.fingerprint != fingerprint else { continue }
+            if let previous, previous.fingerprint != nil {
+                superseded.append(uuid(key, version: previous.version))
+            }
+            let version = (previous?.version ?? 0) + 1
+            entries[key] = Entry(fingerprint: fingerprint, version: version)
+            send.append(versioned(record, version: version))
+        }
+        if complete && !records.isEmpty {
+            let present = Set(records.map(\.uuid))
+            for (key, entry) in entries where entry.fingerprint != nil && !present.contains(key) {
+                superseded.append(uuid(key, version: entry.version))
+                entries[key]?.fingerprint = nil
+            }
+        }
+        return (send, superseded.sorted())
+    }
+
+    /// The record as sent: versioned uuid, stable key in details.recordKey.
+    func versioned(_ record: SampleDTO, version: Int) -> SampleDTO {
+        var out = record
+        out.uuid = uuid(record.uuid, version: version)
+        var details = out.details ?? [:]
+        details["recordKey"] = .string(record.uuid)
+        out.details = details
+        return out
+    }
+
+    /// Content identity of a record; timestamps are left out because
+    /// characteristics and medications are stamped at read time.
+    static func fingerprint(_ record: SampleDTO) -> String {
+        let content: [String: JSONValue] = [
+            "value": record.value.map { value -> JSONValue in
+                switch value {
+                case .string(let s): .string(s)
+                case .number(let n): .number(n)
+                }
+            } ?? .null,
+            "details": .object(record.details ?? [:]),
+        ]
+        let data = (try? Wire.bodyEncoder().encode(content)) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 }

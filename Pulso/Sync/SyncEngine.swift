@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import HealthKit
 
@@ -65,9 +64,8 @@ actor SyncEngine {
     /// GET /latest from the configured server; nil when unavailable.
     private let latestHints: @Sendable () async -> [String: String]?
     private var anchorCache: [String: HKQueryAnchor] = [:]
-    /// Snapshot fingerprints already queued, leading the delivered ones the
-    /// same way anchorCache leads the persisted anchors.
-    private var snapshotCache: [String: [String: String]] = [:]
+    /// Snapshot state as last queued; survives in memory between passes.
+    private var snapshotCache: [String: SnapshotState] = [:]
     private var chain: Task<Void, Never>?
     /// Types whose query threw last time (typically authorization not yet
     /// granted for a newly added type). They must not hold the catch-up
@@ -259,7 +257,16 @@ actor SyncEngine {
         }
         for source in AppSettings.currentEnabledSnapshots() where keys?.contains(source.key) ?? true {
             do {
-                let records = try await source.read(queries, .live, nil).map(Self.versioned)
+                // Re-sends each record's current version (same uuid); a record
+                // that changed since the last sync goes out with the next one.
+                let state = snapshotCache[source.key]
+                    ?? anchors.loadRaw(source.key).flatMap { try? JSONDecoder().decode(SnapshotState.self, from: $0) }
+                guard let state else { continue }
+                let records = try await source.read(queries, .live, nil).compactMap { record -> SampleDTO? in
+                    guard let entry = state.entries[record.uuid],
+                          entry.fingerprint == SnapshotState.fingerprint(record) else { return nil }
+                    return state.versioned(record, version: entry.version)
+                }
                 if !records.isEmpty {
                     try await outbox.enqueue(typeKey: source.key, elements: records.map(BatchElement.sample))
                     queued += records.count
@@ -357,78 +364,30 @@ actor SyncEngine {
         }
     }
 
-    /// Reads a snapshot source and queues the records whose content changed
-    /// since the last queued read; the new fingerprints are saved once the
-    /// records are on disk, like an anchor.
-    ///
-    /// Each version of a record gets its own uuid (stable key + content
-    /// fingerprint) and the version it replaces is tombstoned, so receivers
-    /// that keep the first copy of a uuid still end up with the latest
-    /// content. `details.recordKey` carries the stable key.
+    /// Reads a snapshot source and queues new versions of the records whose
+    /// content changed (see SnapshotState). The state is saved once the
+    /// batch is on disk, like an anchor once its samples are queued.
     private func syncSnapshot(_ source: SnapshotSource) async throws -> Int {
-        let stored = anchors.loadRaw(source.key)
-        let delivered = snapshotCache[source.key]
-            ?? stored.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
-        let records = try await source.read(queries, .live, delivered)
-        var state = delivered ?? [:]
-        var changed: [SampleDTO] = []
-        var superseded: [String] = []
-        for record in records {
-            let key = record.uuid
-            let fingerprint = Self.fingerprint(record)
-            guard state[key] != fingerprint else { continue }
-            if let previous = state[key] {
-                superseded.append(Self.versionedUUID(key, previous))
-            }
-            state[key] = fingerprint
-            changed.append(Self.versioned(record))
-        }
+        let known = snapshotCache[source.key]
+            ?? anchors.loadRaw(source.key).flatMap { try? JSONDecoder().decode(SnapshotState.self, from: $0) }
+        let records = try await source.read(queries, .live, known?.fingerprints)
+        var state = known ?? .fresh()
+        let (send, superseded) = state.apply(records, complete: source.complete)
         await status.recordChecked(source.key)
         let encoded = try JSONEncoder().encode(state)
-        guard !changed.isEmpty else {
-            if stored == nil { anchors.saveRaw(encoded, for: source.key) }
+        guard !send.isEmpty || !superseded.isEmpty else {
+            if known == nil { anchors.saveRaw(encoded, for: source.key) }
             return 0
         }
-        var elements = changed.map(BatchElement.sample)
+        var elements = send.map(BatchElement.sample)
         if !superseded.isEmpty {
             elements.append(.tombstone(superseded))
         }
         try await outbox.enqueue(typeKey: source.key, elements: elements)
         anchors.saveRaw(encoded, for: source.key)
         snapshotCache[source.key] = state
-        await log.info("\(source.key): queued \(changed.count) changed record(s)")
-        return changed.count
-    }
-
-    static func versionedUUID(_ key: String, _ fingerprint: String) -> String {
-        "\(key)-\(fingerprint.prefix(12))"
-    }
-
-    /// The record as sent: uuid versioned by content, stable key kept in
-    /// details.recordKey.
-    static func versioned(_ record: SampleDTO) -> SampleDTO {
-        var out = record
-        out.uuid = versionedUUID(record.uuid, fingerprint(record))
-        var details = out.details ?? [:]
-        details["recordKey"] = .string(record.uuid)
-        out.details = details
-        return out
-    }
-
-    /// Content identity of a snapshot record; timestamps are left out
-    /// because characteristics and medications are stamped at read time.
-    static func fingerprint(_ record: SampleDTO) -> String {
-        let content: [String: JSONValue] = [
-            "value": record.value.map { value -> JSONValue in
-                switch value {
-                case .string(let s): .string(s)
-                case .number(let n): .number(n)
-                }
-            } ?? .null,
-            "details": .object(record.details ?? [:]),
-        ]
-        let data = (try? Wire.bodyEncoder().encode(content)) ?? Data()
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        await log.info("\(source.key): queued \(send.count) new version(s), \(superseded.count) superseded")
+        return send.count
     }
 
     /// The SDK has flip-flopped on the optionality of `newAnchor`; funneling
