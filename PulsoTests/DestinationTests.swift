@@ -157,22 +157,27 @@ final class DestinationTests: XCTestCase {
     }
 
     /// A destination whose URL is being edited still gets the batch queued,
-    /// so it delivers later instead of missing what synced meanwhile.
-    func testUnconfiguredButEnabledDestinationStillQueues() async throws {
+    /// so it delivers later instead of missing what synced meanwhile; one
+    /// added and never set up gets nothing, so its queue can't grow forever.
+    func testUnconfiguredDestinationsQueueOnlyIfTheyWereConfiguredBefore() async throws {
         let file = Destination(name: "file", kind: .file)
-        var editing = Destination(name: "rest", kind: .rest)
-        editing.url = ""
+        var editing = Destination(name: "editing", kind: .rest)
+        editing.wasConfigured = true
+        let abandoned = Destination(name: "abandoned", kind: .mqtt)
         XCTAssertFalse(editing.isConfigured)
-        let failing = MockTransport()
-        failing.failing = true
-        let destinations = [file, editing]
+        XCTAssertFalse(abandoned.isConfigured)
+        let destinations = [file, editing, abandoned]
+        // Like production: an unconfigured destination has no transport.
         let hub = OutboxHub(
             root: base, log: LogStore(directory: base), status: AppStatus(),
             destinations: { destinations },
-            transport: { $0.id == file.id ? MockTransport() : failing }
+            transport: { $0.isConfigured ? MockTransport() : nil }
         )
         try await hub.enqueue(typeKey: "heartRate", elements: [sample("a")])
-        XCTAssertEqual(pendingFiles(editing.id).count, 1)
+        await hub.drain(force: true)
+        XCTAssertEqual(pendingFiles(file.id), [])
+        XCTAssertEqual(pendingFiles(editing.id).count, 1, "waits for its URL")
+        XCTAssertEqual(pendingFiles(abandoned.id), [], "never configured, never queued")
     }
 
     /// Fields added in later versions must not make a stored list unreadable.
@@ -185,5 +190,6 @@ final class DestinationTests: XCTestCase {
         XCTAssertEqual(decoded.first?.gzip, true)
         XCTAssertEqual(decoded.first?.format, .envelope)
         XCTAssertEqual(decoded.first?.enabled, true)
+        XCTAssertEqual(decoded.first?.wasConfigured, true, "a stored destination with a URL counts as configured")
     }
 }

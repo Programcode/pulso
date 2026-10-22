@@ -43,7 +43,7 @@ final class AppServices {
                 // The anchor is shared, so skipping history is only safe when
                 // every destination already has it: all must answer, and the
                 // earliest answer per type wins.
-                let destinations = AppSettings.activeDestinations()
+                let destinations = AppSettings.receivingDestinations()
                 guard !destinations.isEmpty, destinations.allSatisfy({ $0.latestURL != nil }) else { return nil }
                 var answers: [[String: String]] = []
                 for destination in destinations {

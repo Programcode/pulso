@@ -55,13 +55,25 @@ final class AppSettings {
         storeDestinations(migrated)
     }
 
-    /// Header values go to the Keychain; the list is saved with them blank.
+    /// Header values go to the Keychain (written only when they change);
+    /// the list is saved with them blank. Values of header rows that were
+    /// removed are deleted from the Keychain.
     nonisolated static func storeDestinations(_ destinations: [Destination]) {
+        let previous = storedDestinations()
         var stripped = destinations
         for index in stripped.indices {
+            if stripped[index].isConfigured { stripped[index].wasConfigured = true }
+            let destination = stripped[index]
+            let kept = Set(destination.headers.map(\.id))
+            for old in previous.first(where: { $0.id == destination.id })?.headers ?? [] where !kept.contains(old.id) {
+                Keychain.set(nil, for: destination.headerValueAccount(old))
+            }
             for headerIndex in stripped[index].headers.indices {
                 let header = stripped[index].headers[headerIndex]
-                Keychain.set(header.value, for: stripped[index].headerValueAccount(header))
+                let account = destination.headerValueAccount(header)
+                if Keychain.string(for: account) ?? "" != header.value {
+                    Keychain.set(header.value, for: account)
+                }
                 stripped[index].headers[headerIndex].value = ""
             }
         }
@@ -71,8 +83,7 @@ final class AppSettings {
     }
 
     nonisolated static func currentDestinations() -> [Destination] {
-        guard let data = UserDefaults.standard.data(forKey: SettingsKeys.destinations),
-              var destinations = try? JSONDecoder().decode([Destination].self, from: data) else { return [] }
+        var destinations = storedDestinations()
         for index in destinations.indices {
             for headerIndex in destinations[index].headers.indices {
                 let header = destinations[index].headers[headerIndex]
@@ -85,8 +96,23 @@ final class AppSettings {
         return destinations
     }
 
-    nonisolated static func activeDestinations() -> [Destination] {
-        currentDestinations().filter { $0.enabled && $0.isConfigured }
+    /// The stored list as saved; an entry that can't be decoded (written by a
+    /// newer version) is skipped rather than emptying the whole list.
+    nonisolated private static func storedDestinations() -> [Destination] {
+        struct Lossy: Decodable {
+            let value: Destination?
+            init(from decoder: Decoder) throws { value = try? Destination(from: decoder) }
+        }
+        guard let data = UserDefaults.standard.data(forKey: SettingsKeys.destinations),
+              let entries = try? JSONDecoder().decode([Lossy].self, from: data) else { return [] }
+        return entries.compactMap(\.value)
+    }
+
+    /// Destinations that get a copy of every batch.
+    nonisolated static func receivingDestinations() -> [Destination] {
+        currentDestinations().filter(\.receivesBatches)
+    }
+
     }
 
     func isEnabled(_ key: String) -> Bool { enabled[key] ?? true }

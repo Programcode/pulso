@@ -61,6 +61,10 @@ struct Destination: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var kind: Kind
     var enabled = true
+    /// Set once the destination has had a usable URL / host. Only then does
+    /// it keep queueing while unconfigured (e.g. mid-edit); one added and
+    /// never set up gets nothing, so its queue can't grow forever.
+    var wasConfigured = false
 
     // HTTP kinds
     var url = ""
@@ -93,7 +97,7 @@ struct Destination: Codable, Identifiable, Equatable, Sendable {
         id = try c.decode(UUID.self, forKey: .id)
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? enabled
         url = try c.decodeIfPresent(String.self, forKey: .url) ?? url
-        format = try c.decodeIfPresent(BodyFormat.self, forKey: .format) ?? format
+        format = (try? c.decodeIfPresent(BodyFormat.self, forKey: .format)) ?? format
         gzip = try c.decodeIfPresent(Bool.self, forKey: .gzip) ?? gzip
         headers = try c.decodeIfPresent([Header].self, forKey: .headers) ?? headers
         catchUp = try c.decodeIfPresent(Bool.self, forKey: .catchUp) ?? catchUp
@@ -105,6 +109,8 @@ struct Destination: Codable, Identifiable, Equatable, Sendable {
         mqttRetain = try c.decodeIfPresent(Bool.self, forKey: .mqttRetain) ?? mqttRetain
         folderBookmark = try c.decodeIfPresent(Data.self, forKey: .folderBookmark)
         folderName = try c.decodeIfPresent(String.self, forKey: .folderName)
+        // Last: the fallback reads the fields above.
+        wasConfigured = try c.decodeIfPresent(Bool.self, forKey: .wasConfigured) ?? isConfigured
     }
 
     init(name: String, kind: Kind) {
@@ -198,6 +204,11 @@ struct Destination: Codable, Identifiable, Equatable, Sendable {
         if !s.contains("://") { s = "https://" + s }
         guard let url = URL(string: s), url.host() != nil else { return nil }
         return url
+    }
+
+    /// Gets a copy of every batch.
+    var receivesBatches: Bool {
+        enabled && (isConfigured || wasConfigured)
     }
 
     var isConfigured: Bool {

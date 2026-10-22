@@ -59,11 +59,11 @@ actor OutboxHub {
         return outbox
     }
 
-    /// Every enabled destination, configured or not: one whose URL is being
-    /// edited keeps queueing and delivers once it is valid again, instead of
-    /// missing the batches synced meanwhile.
+    /// Every destination that receives batches, configured right now or
+    /// not: one whose URL is being edited keeps queueing and delivers once
+    /// it is valid again, instead of missing the batches synced meanwhile.
     private var active: [(destination: Destination, outbox: Outbox)] {
-        destinations().filter(\.enabled).map { ($0, outbox(for: $0)) }
+        destinations().filter(\.receivesBatches).map { ($0, outbox(for: $0)) }
     }
 
     /// True when at least one destination can deliver right now.

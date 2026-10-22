@@ -268,11 +268,18 @@ struct FileTransport: Transport {
             return try body(Self.defaultFolder)
         }
         var stale = false
-        let folder = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale)
-        guard !stale, folder.startAccessingSecurityScopedResource() else {
+        let folder: URL
+        do {
+            // A stale bookmark that still resolves keeps working; re-picking
+            // the folder refreshes it.
+            folder = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale)
+        } catch {
             throw FolderAccessError()
         }
-        defer { folder.stopAccessingSecurityScopedResource() }
+        // Folders inside the app's own container need no scope, so a false
+        // here isn't fatal; the write itself reports a real permission error.
+        let scoped = folder.startAccessingSecurityScopedResource()
+        defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
         // Coordinated, so iCloud Drive sees the write as one change.
         var coordinationError: NSError?
         var bodyError: Error?

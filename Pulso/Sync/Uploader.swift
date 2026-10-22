@@ -61,10 +61,16 @@ struct HTTPUploader: Uploading {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         do {
-            let (data, response) = try await session.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            // Same redirect rule as deliveries, so Test can't pass a URL
+            // that every upload would fail on.
+            let (data, response) = try await session.data(for: request, delegate: NoRedirects.shared)
+            let http = response as? HTTPURLResponse
+            let status = http?.statusCode ?? 0
             if (200 ..< 300).contains(status) {
                 return "OK — HTTP \(status)"
+            }
+            if (300 ..< 400).contains(status), let location = http?.value(forHTTPHeaderField: "Location") {
+                return "HTTP \(status): the server redirects to \(location) — use that address instead"
             }
             return "HTTP \(status): \(String(decoding: data.prefix(120), as: UTF8.self))"
         } catch {

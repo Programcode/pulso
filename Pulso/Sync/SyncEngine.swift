@@ -335,7 +335,7 @@ actor SyncEngine {
     }
 
     private func cachedLatestHints() async -> [String: String]? {
-        let destinations = AppSettings.activeDestinations()
+        let destinations = AppSettings.receivingDestinations()
             .map { "\($0.id.uuidString)|\($0.latestURL?.absoluteString ?? "-")" }
             .sorted()
             .joined(separator: ",")

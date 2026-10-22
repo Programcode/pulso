@@ -116,7 +116,14 @@ struct DestinationEditor: View {
         }
         .onChange(of: destination) { _, _ in services.destinationsChanged() }
         .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
-            guard case .success(let url) = result else { return }
+            let url: URL
+            switch result {
+            case .success(let picked):
+                url = picked
+            case .failure(let error):
+                testResult = "Couldn't open that folder: \(error.localizedDescription)"
+                return
+            }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
