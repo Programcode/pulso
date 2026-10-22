@@ -86,8 +86,10 @@ actor OutboxHub {
     /// exactly the set the catch-up hints came from (checked against the
     /// same list it writes to).
     func enqueue(typeKey: String, elements: [BatchElement], catchUpKey: String? = nil) async throws {
+        // Every decision comes from this one snapshot: a second read could
+        // see a deliverable destination this list doesn't write to.
         let targets = active
-        guard hasActiveDestination() else { throw EnqueueError.noDestination }
+        guard targets.contains(where: { $0.destination.isConfigured }) else { throw EnqueueError.noDestination }
         if let catchUpKey, AppSettings.catchUpKey(targets.map(\.destination)) != catchUpKey {
             throw EnqueueError.destinationsChanged
         }

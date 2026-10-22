@@ -249,6 +249,9 @@ final class AppServices {
     }
 
     func syncFromIntent(keys: Set<String>?) async -> String {
+        // Otherwise the pass returns early and the shortcut would report the
+        // previous sync's summary as if this one had run.
+        guard await outbox.hasActiveDestination() else { return "No destination is configured." }
         await withBackgroundTime("pulso-shortcut-sync") {
             await engine.requestSync(.intent("Sync Health Data"), only: keys)
         }
