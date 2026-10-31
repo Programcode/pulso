@@ -79,6 +79,18 @@ enum CatchUp {
     }
 }
 
+/// What one sync pass did, for callers that report it (the shortcuts).
+struct SyncOutcome: Sendable {
+    /// Samples and snapshot records queued.
+    var queued = 0
+    /// Sample types and snapshot sources the pass read.
+    var attempted = 0
+    /// Keys whose read failed this pass.
+    var failed: [String] = []
+    /// Batches still waiting after the drain.
+    var pending = 0
+}
+
 /// Per enabled type: run an anchored query from the last anchor, write the
 /// results into every destination's durable queue, then persist the new
 /// anchor. The data is on disk before the anchor moves, and each queue
@@ -130,26 +142,29 @@ actor SyncEngine {
     /// after its own pass (and the outbox drain it triggers) completes.
     /// `only` limits a pass to those type keys (observer wakes name the
     /// types that changed); nil means every enabled type and snapshot.
-    func requestSync(_ reason: SyncReason, only keys: Set<String>? = nil) async {
+    /// `allTypes` reads every type this build knows, whatever the toggles
+    /// say (the Sync All Health Data shortcut).
+    @discardableResult
+    func requestSync(_ reason: SyncReason, only keys: Set<String>? = nil, allTypes: Bool = false) async -> SyncOutcome {
         let previous = chain
-        let task = Task {
+        let task = Task { () -> SyncOutcome in
             await previous?.value
-            await self.performSync(reason, only: keys)
+            return await self.performSync(reason, only: keys, allTypes: allTypes)
         }
-        chain = task
-        await task.value
+        chain = Task { _ = await task.value }
+        return await task.value
     }
 
-    private func performSync(_ reason: SyncReason, only keys: Set<String>?) async {
+    private func performSync(_ reason: SyncReason, only keys: Set<String>?, allTypes: Bool) async -> SyncOutcome {
         guard await outbox.hasActiveDestination() else {
             await log.info("sync skipped (\(reason)): no destination configured")
-            return
+            return SyncOutcome()
         }
         await status.setSyncing(true)
         await status.recordSyncStarted()
         // Types this OS refused at authorization would only fail their query.
         let refused = HealthAuthorization.lastRejected()
-        let enabled = AppSettings.currentEnabledTypes().filter {
+        let enabled = (allTypes ? TypeRegistry.all : AppSettings.currentEnabledTypes()).filter {
             !refused.contains($0.sampleType.identifier) && (keys?.contains($0.key) ?? true)
         }
 
@@ -198,27 +213,29 @@ actor SyncEngine {
         }
 
         var queued = 0
-        var anyFailed = false
+        var failedNow: [String] = []
         for type in enabled {
             do {
                 queued += try await sync(type, anchor: resolvedAnchors[type.key], cutoffs: cutoffs, catchUpKey: catchUpKey)
             } catch {
-                anyFailed = true
+                failedNow.append(type.key)
                 authBlocked.insert(type.key)
                 await log.error("\(type.key): \(error.localizedDescription)")
             }
         }
         // Snapshots have no observer of their own; they ride along on every
         // full pass, or when a shortcut names them.
-        for source in AppSettings.currentEnabledSnapshots() where keys?.contains(source.key) ?? true {
+        let snapshots = (allTypes ? TypeRegistry.snapshots : AppSettings.currentEnabledSnapshots())
+            .filter { keys?.contains($0.key) ?? true }
+        for source in snapshots {
             do {
                 queued += try await syncSnapshot(source)
             } catch {
-                anyFailed = true
+                failedNow.append(source.key)
                 await log.error("\(source.key): \(error.localizedDescription)")
             }
         }
-        if reimporting && !anyFailed && keys == nil {
+        if reimporting && failedNow.isEmpty && keys == nil {
             UserDefaults.standard.set(false, forKey: SettingsKeys.reimportPending)
             await log.info("full re-import pass completed for all enabled types")
         }
@@ -239,6 +256,7 @@ actor SyncEngine {
         if queued > 0 {
             await log.info("sync (\(reason)): queued \(queued) sample(s)")
         }
+        return SyncOutcome(queued: queued, attempted: enabled.count + snapshots.count, failed: failedNow, pending: pending)
     }
 
     /// Re-sends what HealthKit holds between `start` and `end` (open ends

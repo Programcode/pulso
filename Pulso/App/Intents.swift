@@ -106,6 +106,33 @@ struct BackfillHealthDataIntent: AppIntent {
     }
 }
 
+/// Every type Pulso can read, toggles or not, including types later
+/// versions add; no parameters, so it can run from an automation unattended.
+struct SyncAllHealthDataIntent: AppIntent {
+    static var title: LocalizedStringResource = "Sync All Health Data"
+    static var description = IntentDescription(
+        "Sends new data for every Apple Health type Pulso can read, including types switched off in Settings and types added in later versions. Runs in the background without asking anything, so it suits automations."
+    )
+    static var openAppWhenRun = false
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let services = AppServices.shared
+        services.launchIfNeeded()
+        let summary = try await services.syncAllFromIntent()
+        return .result(value: summary, dialog: IntentDialog(stringLiteral: summary))
+    }
+}
+
+/// An error Shortcuts shows as is: what went wrong and what to do.
+struct IntentFailure: Error, CustomLocalizedStringResourceConvertible {
+    let message: String
+
+    init(_ message: String) { self.message = message }
+
+    var localizedStringResource: LocalizedStringResource { LocalizedStringResource(stringLiteral: message) }
+}
+
 struct GetSyncStatusIntent: AppIntent {
     static var title: LocalizedStringResource = "Get Last Sync Status"
     static var description = IntentDescription("Reports when Pulso last synced, what it sent, and what is still queued.")
@@ -125,6 +152,16 @@ struct PulsoShortcuts: AppShortcutsProvider {
             phrases: ["Sync health data with \(.applicationName)", "\(.applicationName) sync"],
             shortTitle: "Sync Health Data",
             systemImageName: "arrow.triangle.2.circlepath"
+        )
+        AppShortcut(
+            intent: SyncAllHealthDataIntent(),
+            phrases: [
+                "Sync all health data with \(.applicationName)",
+                "\(.applicationName) sync all",
+                "Send all my health data with \(.applicationName)",
+            ],
+            shortTitle: "Sync All Health Data",
+            systemImageName: "heart.text.square"
         )
         AppShortcut(
             intent: BackfillHealthDataIntent(),
