@@ -98,9 +98,14 @@ Not synced: clinical records (FHIR) and CDA documents. Both need the
 certificates generally can't grant; HealthKit itself withholds a few
 identifiers (shown in Coverage).
 
-Every type can be toggled in Settings (all on by default). Vision
-prescriptions and medications are shared item by item: tap their buttons
-under Settings → Health Access.
+Settings → Sync All Health Data syncs every type above and asks for all of
+them in one Health permission sheet. It is saved as a mode, not a list:
+types a newer build or a newer iOS adds are synced too, and the app asks for
+them the next time it opens. Turn it off to pick types one by one; your
+earlier picks come back. New installs start with it on, and so does an
+existing install that never switched a type off. Vision prescriptions and
+medications are shared item by item either way: tap their buttons under
+Settings → Health Access.
 
 ### Destinations
 

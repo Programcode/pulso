@@ -137,7 +137,16 @@ final class AppServices {
         case .active:
             Task {
                 await refreshAuthStatus()
-                await syncNow(.foreground)
+                if settings.syncAll && status.authNeeded && !autoRequestedAccess {
+                    // Types this build reads that HealthKit has never asked
+                    // about: one sheet covers them. Once per launch, since a
+                    // dismissed sheet leaves them unasked.
+                    autoRequestedAccess = true
+                    await log.info("sync all: asking for Health types not requested yet")
+                    await requestHealthAccess() // syncs afterwards
+                } else {
+                    await syncNow(.foreground)
+                }
             }
         case .background:
             hub.scheduleNextRefresh()
@@ -168,6 +177,8 @@ final class AppServices {
         }
         return set
     }()
+
+    private var autoRequestedAccess = false
 
     func requestHealthAccess() async {
         do {
@@ -213,6 +224,24 @@ final class AppServices {
             .map(\.key) + AppSettings.currentEnabledSnapshots().map(\.key)
         status.needsInitialImport = pendingKeys.contains { !anchors.hasAnchor($0) }
         await outbox.refreshPendingStatus()
+    }
+
+    /// Turning the mode on enables every type at once, so it also asks for
+    /// any HealthKit hasn't been asked about; turning it off restores the
+    /// saved per-type selection.
+    func setSyncAll(_ on: Bool) {
+        settings.syncAll = on
+        Task {
+            await hub.startObservers()
+            await refreshAuthStatus()
+            if on && status.authNeeded {
+                autoRequestedAccess = true
+                await requestHealthAccess() // syncs afterwards
+            } else {
+                await engine.requestSync(.settingsChanged)
+                await refreshDerived()
+            }
+        }
     }
 
     func typeTogglesChanged() {

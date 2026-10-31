@@ -5,6 +5,9 @@ enum SettingsKeys {
     /// The single server URL from before destinations; read once to migrate.
     static let endpoint = "server.endpoint"
     static let enabledTypes = "types.enabled"
+    /// "Sync all health data": every type this build can read, whatever
+    /// the per-type toggles say. The toggles are kept for when it's off.
+    static let syncAll = "types.syncAll"
     static let tokenAccount = "server-token"
     static let outboxSequence = "outbox.seq"
     /// True from the moment a full re-import is requested until a sync pass
@@ -25,6 +28,12 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(enabled, forKey: SettingsKeys.enabledTypes) }
     }
 
+    /// Stored as a mode rather than a list, so types a newer build (or a
+    /// newer iOS) adds are included without touching Settings.
+    var syncAll: Bool {
+        didSet { UserDefaults.standard.set(syncAll, forKey: SettingsKeys.syncAll) }
+    }
+
     /// Where data goes. Saved on every change; secrets are kept in the
     /// Keychain by Destination itself.
     var destinations: [Destination] {
@@ -34,6 +43,10 @@ final class AppSettings {
     init() {
         Self.migrateLegacyEndpoint()
         enabled = Self.storedEnabled()
+        syncAll = Self.currentSyncAll()
+        // Saves the default currentSyncAll() picked, so switching a type
+        // off later can't flip the install out of the mode.
+        UserDefaults.standard.set(syncAll, forKey: SettingsKeys.syncAll)
         destinations = Self.currentDestinations()
         // Rewrites the stored list once per launch, so a header value saved
         // in plain text by an earlier build moves to the Keychain.
@@ -125,7 +138,7 @@ final class AppSettings {
             .joined(separator: ",")
     }
 
-    func isEnabled(_ key: String) -> Bool { enabled[key] ?? true }
+    func isEnabled(_ key: String) -> Bool { syncAll || (enabled[key] ?? true) }
     func setEnabled(_ key: String, _ value: Bool) { enabled[key] = value }
 
     // MARK: - Shared parsing / thread-safe accessors
@@ -139,16 +152,33 @@ final class AppSettings {
         return url
     }
 
-    nonisolated static func currentEnabled(_ key: String) -> Bool {
-        storedEnabled()[key] ?? true
+    /// Before the setting existed, an install that never switched a type
+    /// off was already syncing everything, so it starts in the mode; one
+    /// with a hand-picked selection keeps it.
+    nonisolated static func currentSyncAll() -> Bool {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: SettingsKeys.syncAll) != nil else {
+            return !storedEnabled().values.contains(false)
+        }
+        return defaults.bool(forKey: SettingsKeys.syncAll)
+    }
+
+    /// Whether a key syncs, from one read of the stored settings, for
+    /// callers that check every type.
+    nonisolated static func enabledFilter() -> (String) -> Bool {
+        if currentSyncAll() { return { _ in true } }
+        let stored = storedEnabled()
+        return { stored[$0] ?? true }
     }
 
     nonisolated static func currentEnabledTypes() -> [SyncedType] {
-        TypeRegistry.all.filter { currentEnabled($0.key) }
+        let isEnabled = enabledFilter()
+        return TypeRegistry.all.filter { isEnabled($0.key) }
     }
 
     nonisolated static func currentEnabledSnapshots() -> [SnapshotSource] {
-        TypeRegistry.snapshots.filter { currentEnabled($0.key) }
+        let isEnabled = enabledFilter()
+        return TypeRegistry.snapshots.filter { isEnabled($0.key) }
     }
 
     nonisolated private static func storedEnabled() -> [String: Bool] {

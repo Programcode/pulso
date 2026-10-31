@@ -109,8 +109,9 @@ final class TriggerHub {
         let refused = HealthAuthorization.lastRejected()
         var descriptors: [HKQueryDescriptor] = []
         var unavailable: [String] = []
+        let isEnabled = AppSettings.enabledFilter()
         for type in TypeRegistry.all {
-            guard AppSettings.currentEnabled(type.key), !refused.contains(type.sampleType.identifier) else {
+            guard isEnabled(type.key), !refused.contains(type.sampleType.identifier) else {
                 try? await healthStore.disableBackgroundDelivery(for: type.sampleType)
                 continue
             }
