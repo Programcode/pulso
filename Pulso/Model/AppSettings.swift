@@ -43,7 +43,8 @@ final class AppSettings {
     init() {
         Self.migrateLegacyEndpoint()
         enabled = Self.storedEnabled()
-        syncAll = Self.currentSyncAll()
+        let syncAll = Self.currentSyncAll()
+        self.syncAll = syncAll
         // Saves the default currentSyncAll() picked, so switching a type
         // off later can't flip the install out of the mode.
         UserDefaults.standard.set(syncAll, forKey: SettingsKeys.syncAll)
