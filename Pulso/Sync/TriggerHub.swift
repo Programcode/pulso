@@ -109,8 +109,9 @@ final class TriggerHub {
         let refused = HealthAuthorization.lastRejected()
         var descriptors: [HKQueryDescriptor] = []
         var unavailable: [String] = []
+        let isEnabled = AppSettings.enabledFilter()
         for type in TypeRegistry.all {
-            guard AppSettings.currentEnabled(type.key), !refused.contains(type.sampleType.identifier) else {
+            guard isEnabled(type.key), !refused.contains(type.sampleType.identifier) else {
                 try? await healthStore.disableBackgroundDelivery(for: type.sampleType)
                 continue
             }
@@ -186,15 +187,35 @@ final class TriggerHub {
 }
 
 /// Runs an operation but returns after `seconds` even if it hasn't finished,
-/// cancelling it. Used to guarantee observer completion handlers are called
-/// within the background execution window.
-func withTimeout(seconds: TimeInterval, _ operation: @escaping @Sendable () async -> Void) async {
-    await withTaskGroup(of: Void.self) { group in
-        group.addTask { await operation() }
-        group.addTask {
+/// cancelling it; nil then. Used to guarantee observer completion handlers
+/// are called, and shortcuts return, within the background execution
+/// window. The operation is not awaited past the deadline: a sync pass
+/// keeps going, and its progress is saved page by page.
+@discardableResult
+func withTimeout<T: Sendable>(seconds: TimeInterval, _ operation: @escaping @Sendable () async -> T) async -> T? {
+    await withCheckedContinuation { continuation in
+        let once = ResumeOnce(continuation)
+        let work = Task { once.resume(await operation()) }
+        Task {
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            work.cancel()
+            once.resume(nil)
         }
-        await group.next()
-        group.cancelAll()
+    }
+}
+
+/// Whichever of the operation and the deadline finishes first resumes.
+private final class ResumeOnce<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T?, Never>?
+
+    init(_ continuation: CheckedContinuation<T?, Never>) { self.continuation = continuation }
+
+    func resume(_ value: T?) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }

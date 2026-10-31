@@ -137,7 +137,16 @@ final class AppServices {
         case .active:
             Task {
                 await refreshAuthStatus()
-                await syncNow(.foreground)
+                if settings.syncAll && status.authNeeded && !autoRequestedAccess {
+                    // Types this build reads that HealthKit has never asked
+                    // about: one sheet covers them. Once per launch, since a
+                    // dismissed sheet leaves them unasked.
+                    autoRequestedAccess = true
+                    await log.info("sync all: asking for Health types not requested yet")
+                    await requestHealthAccess() // syncs afterwards
+                } else {
+                    await syncNow(.foreground)
+                }
             }
         case .background:
             hub.scheduleNextRefresh()
@@ -168,6 +177,8 @@ final class AppServices {
         }
         return set
     }()
+
+    private var autoRequestedAccess = false
 
     func requestHealthAccess() async {
         do {
@@ -215,6 +226,24 @@ final class AppServices {
         await outbox.refreshPendingStatus()
     }
 
+    /// Turning the mode on enables every type at once, so it also asks for
+    /// any HealthKit hasn't been asked about; turning it off restores the
+    /// saved per-type selection.
+    func setSyncAll(_ on: Bool) {
+        settings.syncAll = on
+        Task {
+            await hub.startObservers()
+            await refreshAuthStatus()
+            if on && status.authNeeded {
+                autoRequestedAccess = true
+                await requestHealthAccess() // syncs afterwards
+            } else {
+                await engine.requestSync(.settingsChanged)
+                await refreshDerived()
+            }
+        }
+    }
+
     func typeTogglesChanged() {
         Task {
             await hub.startObservers()
@@ -257,6 +286,64 @@ final class AppServices {
         }
         await refreshDerived()
         return status.lastSyncSummary ?? "Sync finished."
+    }
+
+    /// Background time a shortcut gets isn't documented; about 30 seconds
+    /// is what's observed, so the work stops waiting a little before.
+    static let shortcutBudget: TimeInterval = 25
+
+    /// The Sync All Health Data shortcut: every type this build reads,
+    /// whatever the toggles say, within a shortcut's background time. Made
+    /// to run from automations, so it never asks anything; problems it
+    /// can't work around are thrown with what to do about them.
+    func syncAllFromIntent() async throws -> String {
+        guard HKHealthStore.isHealthDataAvailable(), !status.healthUnavailable else {
+            throw IntentFailure("Apple Health isn't available on this device.")
+        }
+        guard await outbox.hasActiveDestination() else {
+            throw IntentFailure("No destination is set up. Add one in Pulso → Settings → Destinations.")
+        }
+        let engine = engine
+        let outbox = outbox
+        // Health data can't be read while the phone is locked, which is
+        // when timed automations often run. Queued batches can still go out;
+        // a message rather than an error keeps scheduled runs quiet.
+        guard UIApplication.shared.isProtectedDataAvailable else {
+            await withBackgroundTime("pulso-shortcut-sync-all") {
+                _ = await withTimeout(seconds: Self.shortcutBudget) { await outbox.drain(force: true) }
+            }
+            let pending = await outbox.pendingCount()
+            await log.info("shortcut: Sync All Health Data ran while locked")
+            return "iPhone locked: Health data can't be read until it's unlocked. "
+                + (pending == 0 ? "Nothing is waiting to be sent." : "\(pending) batch(es) still waiting to be sent.")
+        }
+        await refreshAuthStatus()
+        var result: SyncOutcome??
+        await withBackgroundTime("pulso-shortcut-sync-all") {
+            result = await withTimeout(seconds: Self.shortcutBudget) {
+                await engine.requestSync(.intent("Sync All Health Data"), allTypes: true)
+            }
+        }
+        await refreshDerived()
+        guard let outcome = result ?? nil else {
+            return "Still syncing after \(Int(Self.shortcutBudget)) seconds (a first import takes a while). "
+                + "Progress is saved; the next run carries on."
+        }
+        let succeeded = outcome.attempted - outcome.failed.count
+        if succeeded == 0 && outcome.attempted > 0 {
+            if status.authNeeded {
+                throw IntentFailure("Pulso has no Health access yet. Open Pulso and tap Grant Health Access.")
+            }
+            throw IntentFailure("Every Health type failed to read. Open Pulso → Activity Log for details.")
+        }
+        var parts = ["Checked \(outcome.attempted) types, queued \(outcome.queued.formatted()) new sample(s)."]
+        parts.append(outcome.pending == 0 ? "All delivered." : "\(outcome.pending) batch(es) waiting to be retried.")
+        if status.authNeeded {
+            parts.append("Some types need Health access: open Pulso once.")
+        } else if !outcome.failed.isEmpty {
+            parts.append("\(outcome.failed.count) failed: \(outcome.failed.prefix(3).joined(separator: ", ")).")
+        }
+        return parts.joined(separator: " ")
     }
 
     func resend(keys: Set<String>?, start: Date?, end: Date?, reason: SyncReason) async -> String {

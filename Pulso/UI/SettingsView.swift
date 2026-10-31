@@ -11,6 +11,30 @@ struct SettingsView: View {
                 DestinationsSection(services: services)
 
                 Section {
+                    Toggle(isOn: syncAllBinding.animation()) {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Sync All Health Data")
+                                Text("\(TypeRegistry.all.count + TypeRegistry.snapshots.count) types, and any a future update adds")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } icon: {
+                            Image(systemName: "heart.text.square.fill")
+                                .foregroundStyle(.pink)
+                        }
+                    }
+                } header: {
+                    Text("Health Data")
+                } footer: {
+                    if services.settings.syncAll {
+                        Text("Pulso asks for every type in one Health sheet: tap Turn On All there. To change what you allowed later, use the Health app → Sharing → Apps → Pulso.")
+                    } else {
+                        Text("Pick types one by one below. Your picks are kept if you turn Sync All on and off again.")
+                    }
+                }
+
+                Section {
                     ForEach(TypeRegistry.perObjectTypes, id: \.key) { entry in
                         Button("Choose \(entry.displayName) to share") {
                             Task { await services.requestPerObjectAccess(entry.key) }
@@ -22,32 +46,34 @@ struct SettingsView: View {
                 } header: {
                     Text("Health Access")
                 } footer: {
-                    Text("HealthKit shares these item by item from its own picker, so they need a tap here rather than the main permission sheet.")
+                    Text("HealthKit shares these item by item from its own picker, so they need a tap here rather than the main permission sheet, even with Sync All on.")
                 }
 
-                ForEach(TypeRegistry.groups, id: \.self) { group in
-                    let keys = TypeRegistry.all.filter { $0.group == group }.map(\.key)
-                        + TypeRegistry.snapshots.filter { $0.group == group }.map(\.key)
-                    Section {
-                        ForEach(TypeRegistry.snapshots.filter { $0.group == group }) { source in
-                            Toggle(source.displayName, isOn: enabledBinding(source.key))
-                        }
-                        ForEach(TypeRegistry.all.filter { $0.group == group }) { type in
-                            Toggle(type.displayName, isOn: enabledBinding(type.key))
-                        }
-                    } header: {
-                        HStack {
-                            Text(group)
-                            Spacer()
-                            Button("All") { setAll(keys, true) }
-                            Text("·")
-                            Button("None") { setAll(keys, false) }
-                        }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                    } footer: {
-                        if group == TypeRegistry.groups.last {
-                            Text("Disabling a type stops new deliveries; data already on your server stays there. Newly enabled types back-fill their full history on the next sync.")
+                if !services.settings.syncAll {
+                    ForEach(TypeRegistry.groups, id: \.self) { group in
+                        let keys = TypeRegistry.all.filter { $0.group == group }.map(\.key)
+                            + TypeRegistry.snapshots.filter { $0.group == group }.map(\.key)
+                        Section {
+                            ForEach(TypeRegistry.snapshots.filter { $0.group == group }) { source in
+                                Toggle(source.displayName, isOn: enabledBinding(source.key))
+                            }
+                            ForEach(TypeRegistry.all.filter { $0.group == group }) { type in
+                                Toggle(type.displayName, isOn: enabledBinding(type.key))
+                            }
+                        } header: {
+                            HStack {
+                                Text(group)
+                                Spacer()
+                                Button("All") { setAll(keys, true) }
+                                Text("·")
+                                Button("None") { setAll(keys, false) }
+                            }
+                            .font(.caption)
+                            .buttonStyle(.borderless)
+                        } footer: {
+                            if group == TypeRegistry.groups.last {
+                                Text("Disabling a type stops new deliveries; data already on your server stays there. Newly enabled types back-fill their full history on the next sync.")
+                            }
                         }
                     }
                 }
@@ -76,6 +102,14 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+        }
+    }
+
+    private var syncAllBinding: Binding<Bool> {
+        Binding {
+            services.settings.syncAll
+        } set: { value in
+            services.setSyncAll(value)
         }
     }
 

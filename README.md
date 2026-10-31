@@ -98,9 +98,14 @@ Not synced: clinical records (FHIR) and CDA documents. Both need the
 certificates generally can't grant; HealthKit itself withholds a few
 identifiers (shown in Coverage).
 
-Every type can be toggled in Settings (all on by default). Vision
-prescriptions and medications are shared item by item: tap their buttons
-under Settings → Health Access.
+Settings → Sync All Health Data syncs every type above and asks for all of
+them in one Health permission sheet. It is saved as a mode, not a list:
+types a newer build or a newer iOS adds are synced too, and the app asks for
+them the next time it opens. Turn it off to pick types one by one; your
+earlier picks come back. New installs start with it on, and so does an
+existing install that never switched a type off. Vision prescriptions and
+medications are shared item by item either way: tap their buttons under
+Settings → Health Access.
 
 ### Destinations
 
@@ -123,14 +128,21 @@ that destination accepted it.
 
 - **Sync Health Data** — optional types; with a date range it re-sends that
   period.
+- **Sync All Health Data** — no parameters: every type Pulso can read,
+  including types switched off in Settings and types a later version adds.
+  Runs in the background and never asks anything, so it suits automations.
+  It returns within about 25 seconds with what it queued; a longer pass
+  (a first import) keeps its progress and the next run carries on. It
+  fails with a message when there is no destination or no Health access.
 - **Backfill Health Data** — re-sends history (optionally since a date) for
   some or all types; opens the app so it can run long.
 - **Get Last Sync Status** — returns a text summary: last sync, what was
   sent, what is queued per destination.
 
-Run them from Personal Automations at fixed times. HealthKit is only
-readable while the phone is unlocked, so a sync that fires while it is
-locked does nothing until the next one.
+Run them from Personal Automations at fixed times (Shortcuts → Automation →
+Time of Day, Run Immediately, then the action). HealthKit is only readable
+while the phone is unlocked, so a sync that fires while it is locked only
+sends what was already queued; the next one catches up.
 
 ## Quick start
 
